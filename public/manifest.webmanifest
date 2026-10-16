@@ -1,7 +1,7 @@
 {
   "name": "Vessel Tracker",
   "short_name": "Vessels",
-  "description": "Live AIS traffic around you, a personal watchlist, and range and bearing to every vessel.",
+  "description": "AIS-style traffic around you, a personal watchlist, and range and bearing to every vessel.",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",

@@ -67,18 +67,6 @@ export function cpa(own, target) {
   };
 }
 
-/** Bounding box [[south, west], [north, east]] around a position. */
-export function bboxAround(pos, radiusNm) {
-  const dLat = radiusNm / 60;
-  const dLon = radiusNm / (60 * Math.max(0.05, Math.cos(rad(pos.lat))));
-  const clampLat = (v) => Math.max(-90, Math.min(90, v));
-  const clampLon = (v) => Math.max(-180, Math.min(180, v));
-  return [
-    [clampLat(pos.lat - dLat), clampLon(pos.lon - dLon)],
-    [clampLat(pos.lat + dLat), clampLon(pos.lon + dLon)],
-  ];
-}
-
 export const isValidMmsi = (s) => /^\d{9}$/.test(String(s).trim());
 
 /** Normalise a vessel name the way AIS transmits it: upper case, single spaces. */

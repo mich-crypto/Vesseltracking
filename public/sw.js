@@ -24,7 +24,6 @@ self.addEventListener('fetch', (e) => {
   const req = e.request;
   if (req.method !== 'GET') return;
   const url = new URL(req.url);
-  if (url.pathname.startsWith('/api/') || url.pathname === '/ws') return; // always live
 
   if (isTile(url)) {
     // Cache first, fill in the background.

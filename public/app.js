@@ -1,8 +1,8 @@
 import {
-  distanceNm, bearingDeg, relativeBearing, cpa, bboxAround, isValidMmsi, normName,
+  distanceNm, bearingDeg, relativeBearing, cpa, isValidMmsi, normName,
   shipTypeLabel, formatLatLon, formatBearing,
 } from './geo.js';
-import { LiveFeed, DemoFeed, DEMO_WATCH_SEED, testServer } from './feed.js';
+import { DemoFeed, DEMO_WATCH_SEED } from './feed.js';
 
 // ---------- Constants ----------
 const RENDER_MIN_MS = 2000;            // throttle: at most one re-render every 2 s
@@ -20,7 +20,7 @@ const store = {
   del(key) { try { localStorage.removeItem(key); } catch {} },
 };
 
-const DEFAULT_SETTINGS = { source: null, server: '', range: 10, poll: 15, alert: 2, theme: 'dark', labels: false, tab: 'list', filter: 'all' };
+const DEFAULT_SETTINGS = { range: 10, alert: 2, theme: 'dark', labels: false, tab: 'list', filter: 'all' };
 const settings = { ...DEFAULT_SETTINGS, ...store.get('vt.settings', {}) };
 const saveSettings = () => store.set('vt.settings', settings);
 
@@ -34,7 +34,6 @@ const vessels = new Map(); // mmsi -> vessel
 let me = null;             // { lat, lon, sog, cog, acc, ts, source: 'gps' | 'fallback' }
 let geoError = null;
 let feed = null;
-let feedState = { state: 'starting', detail: '' };
 const alerted = new Set();
 
 // ---------- Helpers ----------
@@ -117,14 +116,12 @@ function render() {
 }
 
 // ---------- Status badge ----------
-const STATUS_LABEL = { live: 'Live', reconnecting: 'Reconnecting', polling: 'Polling', offline: 'Offline', demo: 'Demo', starting: 'Starting' };
+const STATUS_LABEL = { demo: 'Demo', starting: 'Starting' };
 function setStatus(state, detail = '') {
-  feedState = { state, detail };
   const el = $('#status');
   el.className = `badge ${state}`;
   el.title = detail;
   el.lastElementChild.textContent = STATUS_LABEL[state] || state;
-  if (settings.tab === 'settings') renderSettings();
 }
 
 // ---------- Nearby list ----------
@@ -199,7 +196,6 @@ function vesselCard(r) {
   if (w && w.visible === false) pills.push(`<span class="pill">Hidden on chart</span>`);
   if (r.risk) pills.push(`<span class="pill alert">Close quarters</span>`);
   if (r.stale) pills.push(`<span class="pill warn">Stale</span>`);
-  if (v.cached) pills.push(`<span class="pill warn">Last known</span>`);
   const rel = fmtRelative(r.rel);
   const course = v.cog != null && (v.sog ?? 0) > 0.5 ? formatBearing(v.cog) : v.nav === 1 ? 'At anchor' : v.nav === 5 ? 'Moored' : 'Stopped';
   return `
@@ -235,9 +231,7 @@ function renderList(rows) {
       ? ['None of your watchlist is in sight', 'Add vessels with the star on any card, or by MMSI in Watchlist.']
       : settings.filter === 'closing'
         ? ['Nobody is closing on you', 'Vessels with a CPA inside the next hour show up here.']
-        : feedState.state === 'offline'
-          ? ['No connection', 'The list fills again as soon as positions come in.']
-          : [`No vessels within ${settings.range} NM`, 'Widen the traffic range in Settings, or wait for the next reports.'];
+        : [`No vessels within ${settings.range} NM`, 'Widen the traffic range in Settings, or wait for the next reports.'];
     list.innerHTML = `<div class="card empty"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M3 17c2 1.5 4 1.5 6 0s4-1.5 6 0 4 1.5 6 0"/><path d="M12 3v10M8 7h8"/></svg><div class="t">${msg[0]}</div><div>${msg[1]}</div></div>`;
     return;
   }
@@ -410,7 +404,7 @@ function renderWatch(rows) {
       const sub = [w.mmsi ? `MMSI ${w.mmsi}` : 'Matched by name', r ? shipTypeLabel(r.v.type) : null].filter(Boolean).join(' · ');
       const where = r
         ? `${fmtNm(r.dist)} NM<small>${formatBearing(bearingDeg(centre(), r.v))} T · ${fmtAge(r.v.ts)}</small>`
-        : `<span class="muted">Not seen</span><small>${w.mmsi ? 'outside the stream' : `only within ${settings.range} NM`}</small>`;
+        : `<span class="muted">Not seen</span><small>${w.mmsi ? 'not in the traffic' : `only within ${settings.range} NM`}</small>`;
       return `<div class="wrow">
         <div style="min-width:0"><div class="wn">${esc(title)}${w.demo ? ' <span class="pill warn">Demo</span>' : ''}</div><div class="wm">${esc(sub)}</div></div>
         <div class="wd">${where}</div>
@@ -470,8 +464,6 @@ function onWatchButton(e) {
 }
 
 function onWatchChanged() {
-  // Learn MMSIs for name-only entries once the vessel is seen.
-  feed?.resubscribe();
   scheduleRender(true);
 }
 
@@ -479,7 +471,7 @@ function onWatchChanged() {
 function checkAlerts(rows) {
   if (!settings.alert) return;
   for (const r of rows) {
-    if (!r.w || r.w.muted || r.v.cached) continue;
+    if (!r.w || r.w.muted) continue;
     const key = r.w.id;
     if (r.dist <= settings.alert && !alerted.has(key)) {
       alerted.add(key);
@@ -509,35 +501,12 @@ function setSeg(id, value) {
 }
 
 function renderSettings() {
-  setSeg('seg-source', settings.source);
   setSeg('seg-range', settings.range);
-  setSeg('seg-poll', settings.poll);
   setSeg('seg-alert', settings.alert);
   setSeg('seg-theme', settings.theme);
-  const urlInput = $('#server-url');
-  if (document.activeElement !== urlInput) urlInput.value = settings.server;
-  $('#source-desc').textContent = settings.source === 'live'
-    ? `Live AIS through your server. Now: ${STATUS_LABEL[feedState.state] || feedState.state}${feedState.detail ? ` – ${feedState.detail}` : ''}.`
-    : 'Simulated traffic around your position, so you can try the app without a server. Nothing here is real.';
-}
-
-function serverBase() {
-  const base = new URL(settings.server || '.', location.href);
-  if (!base.pathname.endsWith('/')) base.pathname += '/';
-  return base.href;
 }
 
 // ---------- Feed ----------
-let subCentre = null;
-function subscription() {
-  const c = centre();
-  subCentre = c;
-  return {
-    bbox: bboxAround(c, settings.range),
-    mmsi: watch.filter((w) => w.mmsi).map((w) => w.mmsi).slice(0, 50),
-  };
-}
-
 function onVessel(update) {
   if (!update || !update.mmsi) return;
   const mmsi = String(update.mmsi);
@@ -545,12 +514,11 @@ function onVessel(update) {
   const next = { ...prev };
   for (const [k, val] of Object.entries(update)) if (val !== undefined && val !== null && val !== '') next[k] = val;
   next.mmsi = mmsi;
-  delete next.cached;
   if (next.lat == null || next.lon == null) { vessels.set(mmsi, next); return; } // static data before the first position
   vessels.set(mmsi, next);
   // A name-only watch entry learns its MMSI the first time it is seen.
   const w = watch.find((x) => !x.mmsi && x.name && x.name === normName(next.name));
-  if (w) { w.mmsi = mmsi; store.set('vt.watch', watch); feed?.resubscribe(); }
+  if (w) { w.mmsi = mmsi; store.set('vt.watch', watch); }
   scheduleRender();
 }
 
@@ -561,25 +529,9 @@ function startFeed() {
   for (const m of markers.values()) map?.removeLayer(m);
   markers.clear();
   didFit = false;
-  restoreCache();
-  if (settings.source === 'live') {
-    feed = new LiveFeed({ base: serverBase(), pollMinutes: settings.poll, getSubscription: subscription, onVessel, onStatus: setStatus });
-  } else {
-    feed = new DemoFeed({ getCentre: centre, onVessel, onStatus: setStatus });
-  }
+  feed = new DemoFeed({ getCentre: centre, onVessel, onStatus: setStatus });
   feed.start();
   scheduleRender(true);
-}
-
-// Offline-resilient UI: keep the last known picture on the phone.
-function saveCache() {
-  const list = [...vessels.values()].filter((v) => v.lat != null && !v.demo).slice(0, 300);
-  store.set('vt.vessels', { source: settings.source, at: Date.now(), list });
-}
-function restoreCache() {
-  const c = store.get('vt.vessels', null);
-  if (!c || c.source !== settings.source || Date.now() - c.at > 2 * DROP_MS) return;
-  for (const v of c.list || []) vessels.set(v.mmsi, { ...v, cached: true });
 }
 
 // ---------- Location ----------
@@ -594,11 +546,9 @@ function startGeo() {
     me = { lat: latitude, lon: longitude, acc: accuracy, sog, cog: heading != null && !Number.isNaN(heading) ? heading : me?.cog ?? null, ts: p.timestamp, source: 'gps' };
     geoError = null;
     if (first) {
-      if (settings.source === 'demo') startFeed(); // re-centre the demo fleet on you
+      startFeed(); // re-centre the demo fleet on you
       if (map) map.setView([latitude, longitude], map.getZoom());
     }
-    // Ask for a new area once you have moved a quarter of the range.
-    if (subCentre && distanceNm(subCentre, me) > settings.range / 4) feed?.resubscribe();
     scheduleRender();
   }, (err) => {
     geoError = err.code === 1
@@ -613,7 +563,7 @@ const TAB_TEXT = {
   list: ['Nearby', 'Vessels around you, closest first.'],
   map: ['Chart', 'Tap a vessel to see range, bearing and CPA.'],
   watch: ['Watchlist', 'Vessels you follow, wherever they are.'],
-  settings: ['Settings', 'Data source, range, alerts and display.'],
+  settings: ['Settings', 'Range, alerts and display.'],
 };
 function showTab(tab) {
   if (!TAB_TEXT[tab]) tab = 'list';
@@ -673,38 +623,10 @@ function wire() {
   });
 
   const seg = (id, fn) => $(`#${id}`).addEventListener('click', (e) => { const b = e.target.closest('button[data-v]'); if (b) { fn(b.dataset.v); saveSettings(); renderSettings(); } });
-  seg('seg-source', (v) => {
-    if (v === settings.source) return;
-    settings.source = v;
-    if (v === 'live') { const before = watch.length; watch = watch.filter((w) => !w.demo); if (watch.length !== before) store.set('vt.watch', watch); }
-    startFeed();
-  });
-  seg('seg-range', (v) => { settings.range = Number(v); feed?.resubscribe(); didFit = false; scheduleRender(true); });
-  seg('seg-poll', (v) => { settings.poll = Number(v); feed?.setPollMinutes(settings.poll); });
+  seg('seg-range', (v) => { settings.range = Number(v); didFit = false; scheduleRender(true); });
   seg('seg-alert', (v) => { settings.alert = Number(v); alerted.clear(); });
   seg('seg-theme', (v) => { settings.theme = v; applyTheme(); });
   matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => { if (settings.theme === 'system') applyTheme(); });
-
-  $('#server-url').addEventListener('change', (e) => {
-    settings.server = e.target.value.trim();
-    saveSettings();
-    if (settings.source === 'live') startFeed();
-  });
-  $('#btn-test').addEventListener('click', async () => {
-    const out = $('#test-result');
-    out.className = 'hint';
-    out.innerHTML = '<span class="muted">Testing…</span>';
-    try {
-      settings.server = $('#server-url').value.trim(); saveSettings();
-      const h = await testServer(serverBase());
-      if (h.live) { out.className = 'hint good'; out.textContent = 'Connected. The server has an AIS key and can stream live positions.'; }
-      else { out.className = 'hint err'; out.textContent = 'Connected, but the server has no AIS key yet. Run: wrangler secret put AISSTREAM_API_KEY'; }
-    } catch {
-      out.className = 'hint err';
-      out.textContent = `Could not reach ${new URL(serverBase()).host}. Check the address and that the Worker is deployed.`;
-    }
-  });
-  $('#btn-clear').addEventListener('click', () => { store.del('vt.vessels'); toast('Stored positions cleared', 'The watchlist stays.', 'ok'); });
 
   $('#btn-recenter').addEventListener('click', () => { const c = centre(); map?.setView([c.lat, c.lon], Math.max(map.getZoom(), 12)); });
   $('#btn-fit').addEventListener('click', () => fitAll());
@@ -721,32 +643,19 @@ function wire() {
   document.addEventListener('visibilitychange', () => { if (!document.hidden) scheduleRender(true); });
 
   setInterval(() => scheduleRender(), 5000); // keeps "Updated … ago" honest
-  setInterval(saveCache, 30000);
-  addEventListener('pagehide', saveCache);
 }
 
-async function decideSource() {
-  if (settings.source) return;
-  // First visit: use live data when this site is the Worker and it has a key, otherwise the demo.
-  settings.source = 'demo';
-  if (location.protocol.startsWith('http')) {
-    try {
-      const h = await Promise.race([testServer(serverBase()), new Promise((_, rej) => setTimeout(rej, 2500))]);
-      if (h && h.live) settings.source = 'live';
-    } catch {}
-  }
-  if (firstRun && settings.source === 'demo') {
-    watch = DEMO_WATCH_SEED.map((s, i) => ({ id: `demo${i}`, ...s, muted: false, visible: true, demo: true, added: Date.now() }));
-    store.set('vt.watch', watch);
-  }
-  saveSettings();
+function seedDemoWatch() {
+  if (!firstRun) return;
+  watch = DEMO_WATCH_SEED.map((s, i) => ({ id: `demo${i}`, ...s, muted: false, visible: true, demo: true, added: Date.now() }));
+  store.set('vt.watch', watch);
 }
 
-async function boot() {
+function boot() {
   applyTheme();
   wire();
   showTab(settings.tab);
-  await decideSource();
+  seedDemoWatch();
   startGeo();
   startFeed();
   if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) {

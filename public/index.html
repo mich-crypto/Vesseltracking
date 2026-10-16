@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Vessel Tracker</title>
-  <meta name="description" content="Live AIS traffic around you, a personal watchlist, and range and bearing to every vessel.">
+  <meta name="description" content="AIS-style traffic around you, a personal watchlist, and range and bearing to every vessel.">
   <meta name="theme-color" content="#05060a">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -113,22 +113,8 @@
     <section class="view" data-view="settings" hidden>
       <div class="stack">
         <div class="card">
-          <h3>Data</h3>
-          <div class="setting">
-            <div class="t">Source</div>
-            <div class="seg" id="seg-source" role="group" aria-label="Data source">
-              <button type="button" data-v="demo">Demo traffic</button>
-              <button type="button" data-v="live">Live AIS</button>
-            </div>
-            <div class="d" id="source-desc"></div>
-          </div>
-          <div class="setting" id="server-setting">
-            <label class="f" for="server-url"><span>Live data server</span>
-              <input id="server-url" type="url" placeholder="Leave empty to use this site" inputmode="url" spellcheck="false">
-            </label>
-            <div><button type="button" class="btn ghost small" id="btn-test">Test connection</button></div>
-            <p class="hint" id="test-result">The server is the Cloudflare Worker in this repo. It keeps your AIS key off the phone.</p>
-          </div>
+          <h3>Traffic</h3>
+          <div class="notice warn" style="margin-bottom:14px"><span class="ico">!</span><div class="grow">This version shows simulated demo traffic around your position. The vessels are fictional and nothing here is real.</div></div>
           <div class="setting">
             <div class="t">Traffic range</div>
             <div class="seg" id="seg-range" role="group" aria-label="Traffic range">
@@ -137,15 +123,7 @@
               <button type="button" data-v="25">25 NM</button>
               <button type="button" data-v="50">50 NM</button>
             </div>
-            <div class="d">Vessels farther than this are left out. Watchlist vessels always show.</div>
-          </div>
-          <div class="setting">
-            <div class="t">Offshore polling</div>
-            <div class="seg" id="seg-poll" role="group" aria-label="Offshore polling interval">
-              <button type="button" data-v="10">Every 10 min</button>
-              <button type="button" data-v="15">Every 15 min</button>
-            </div>
-            <div class="d">When the live stream drops, the app asks for a snapshot on this interval to save battery and data.</div>
+            <div class="d">Vessels farther than this are left out of the list and the chart.</div>
           </div>
         </div>
         <div class="card">
@@ -171,11 +149,6 @@
               <button type="button" data-v="system">System</button>
             </div>
             <div class="d">Dark keeps your night vision on deck and saves battery on OLED screens.</div>
-          </div>
-          <div class="setting">
-            <div class="t">Stored data</div>
-            <div class="d">The watchlist and the last known positions stay on this phone only.</div>
-            <div><button type="button" class="btn danger small" id="btn-clear">Clear stored positions</button></div>
           </div>
         </div>
         <p class="hint" style="text-align:center">AIS data can be delayed or missing. Never use this app for navigation or collision avoidance.</p>

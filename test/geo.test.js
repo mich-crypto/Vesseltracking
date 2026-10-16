@@ -1,10 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  distanceNm, bearingDeg, relativeBearing, destinationPoint, cpa, bboxAround,
+  distanceNm, bearingDeg, relativeBearing, destinationPoint, cpa,
   isValidMmsi, normName, shipTypeLabel, formatLatLon, formatBearing,
 } from '../public/geo.js';
-import { parseAis, sanitizeSubscription, parseBbox } from '../worker/worker.js';
 
 const near = (a, b, tol, msg) => assert.ok(Math.abs(a - b) <= tol, `${msg ?? ''} expected ${b} ± ${tol}, got ${a}`);
 
@@ -63,12 +62,6 @@ test('CPA: no relative motion', () => {
   assert.equal(cpa(own, tgt).tcpaMin, null);
 });
 
-test('bbox spans the radius in both directions', () => {
-  const [[s, w], [n, e]] = bboxAround({ lat: 52, lon: 4 }, 10);
-  near(n - s, 20 / 60, 1e-9);
-  assert.ok(e - w > n - s, 'longitude span is wider at 52° N');
-});
-
 test('formatting', () => {
   assert.equal(formatLatLon(51.98, true), '51° 58.80′ N');
   assert.equal(formatLatLon(-4.5, false), '4° 30.00′ W');
@@ -81,37 +74,4 @@ test('formatting', () => {
   assert.equal(shipTypeLabel(72), 'Cargo');
   assert.equal(shipTypeLabel(84), 'Tanker');
   assert.equal(shipTypeLabel(0), 'Unknown type');
-});
-
-test('parseAis: position report', () => {
-  const v = parseAis({
-    MessageType: 'PositionReport',
-    MetaData: { MMSI: 244670583, ShipName: 'NORDIC TERN         ', latitude: 51.98, longitude: 4.05, time_utc: '2026-10-16 09:12:30.123456 +0000 UTC' },
-    Message: { PositionReport: { UserID: 244670583, Latitude: 51.98, Longitude: 4.05, Sog: 11.8, Cog: 231.4, TrueHeading: 511, NavigationalStatus: 0 } },
-  });
-  assert.equal(v.mmsi, '244670583');
-  assert.equal(v.name, 'NORDIC TERN');
-  assert.equal(v.sog, 11.8);
-  assert.equal(v.cog, 231.4);
-  assert.equal(v.hdg, undefined, '511 means no heading');
-  assert.equal(v.ts, Date.UTC(2026, 9, 16, 9, 12, 30));
-});
-
-test('parseAis: static data and invalid input', () => {
-  const v = parseAis({
-    MessageType: 'ShipStaticData',
-    MetaData: { MMSI: 246338210 },
-    Message: { ShipStaticData: { Name: 'STELLA ORION@@@', Type: 80, Destination: 'GBIMM', Dimension: { A: 180, B: 48, C: 16, D: 16 } } },
-  });
-  assert.deepEqual([v.name, v.type, v.dest, v.len], ['STELLA ORION', 80, 'GBIMM', 228]);
-  assert.equal(parseAis({ MessageType: 'PositionReport', MetaData: { MMSI: 12 }, Message: {} }), null);
-  assert.equal(parseAis({ MessageType: 'PositionReport', MetaData: { MMSI: 244670583 }, Message: { PositionReport: { Latitude: 91, Longitude: 181 } } }), null);
-});
-
-test('subscriptions are sanitised', () => {
-  const s = sanitizeSubscription({ bbox: [[-95, 4], [52, 200]], mmsi: ['244670583', 'abc', '244670583', 123456789] });
-  assert.deepEqual(s.bbox, [[-90, 4], [52, 180]]);
-  assert.deepEqual(s.mmsi, ['244670583', '123456789']);
-  assert.deepEqual(parseBbox('51.8,3.9,52.1,4.3'), [[51.8, 3.9], [52.1, 4.3]]);
-  assert.equal(parseBbox('1,2,3'), null);
 });
