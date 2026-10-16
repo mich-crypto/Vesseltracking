@@ -4,7 +4,7 @@ import {
   distanceNm, bearingDeg, relativeBearing, destinationPoint, cpa, bboxAround,
   isValidMmsi, normName, shipTypeLabel, formatLatLon, formatBearing,
 } from '../public/geo.js';
-import { parseAis, sanitizeSubscription, parseBbox, pickKey, pickKeyWithSource, maskKey, subscriptionFilter } from '../worker/worker.js';
+import { parseAis, sanitizeSubscription, parseBbox, pickKey, pickKeyWithSource, maskKey, unionFilter, wants } from '../worker/worker.js';
 
 const near = (a, b, tol, msg) => assert.ok(Math.abs(a - b) <= tol, `${msg ?? ''} expected ${b} ± ${tol}, got ${a}`);
 
@@ -125,8 +125,17 @@ test('a key from the app wins over the Worker secret', () => {
   assert.equal(maskKey('57b74732d5ec48a9bb4b4819ace8595e'), '57b7…595e (32 characters)');
 });
 
-test('one upstream subscription: the area, or MMSIs worldwide without an area', () => {
-  assert.deepEqual(subscriptionFilter({ bbox: [[51, 3], [52, 4]], mmsi: ['244670583'] }), { BoundingBoxes: [[[51, 3], [52, 4]]] });
-  assert.deepEqual(subscriptionFilter({ bbox: null, mmsi: ['244670583'] }), { BoundingBoxes: [[[-90, -180], [90, 180]]], FiltersShipMMSI: ['244670583'] });
-  assert.equal(subscriptionFilter({ bbox: null, mmsi: [] }), null);
+test('one subscription covers every device: all boxes, or MMSIs worldwide without boxes', () => {
+  const ipad = { bbox: [[51, 3], [52, 4]], mmsi: [] }, iphone = { bbox: [[53, 5], [54, 6]], mmsi: [] };
+  assert.deepEqual(unionFilter([ipad, iphone, { ...ipad }]), { BoundingBoxes: [[[51, 3], [52, 4]], [[53, 5], [54, 6]]] });
+  assert.deepEqual(unionFilter([{ bbox: null, mmsi: ['244670583'] }]), { BoundingBoxes: [[[-90, -180], [90, 180]]], FiltersShipMMSI: ['244670583'] });
+  assert.equal(unionFilter([]), null);
+});
+
+test('each device only gets vessels inside its own box', () => {
+  const ipad = { bbox: [[51, 3], [52, 4]], mmsi: [] };
+  assert.equal(wants(ipad, { mmsi: '1', lat: 51.5, lon: 3.5 }), true);
+  assert.equal(wants(ipad, { mmsi: '1', lat: 53.5, lon: 5.5 }), false);
+  assert.equal(wants(ipad, { mmsi: '1', name: 'STATIC ONLY' }), true);
+  assert.equal(wants({ bbox: null, mmsi: ['244670583'] }, { mmsi: '244670583', lat: 10, lon: 10 }), true);
 });

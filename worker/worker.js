@@ -3,25 +3,31 @@
 //   GET /api/health                  → { ok, live, version, deployedAt }  (live = the Worker has its own AIS key)
 //   GET /api/check  (X-AIS-Key?)     → tries the key against AisStream: { ok, source, key, message }
 //   GET /ws  (WebSocket)             → client sends {type:"subscribe", bbox, mmsi, apiKey?}; server streams {type:"vessel", v}
-//   GET /api/snapshot?bbox=&mmsi=    → listens upstream for a few seconds, returns { vessels: [...] } (offshore polling)
+//   GET /api/snapshot?bbox=&mmsi=    → recent positions in the box, returns { vessels: [...] } (offshore polling)
 //   everything else                  → static files from ./public
+//
+// AisStream allows ONE connection per API key and briefly blocks a key that reconnects quickly.
+// So /ws, /api/check and /api/snapshot all go to one Durable Object, AisHub. It keeps a single
+// upstream per key, subscribes it to the union of every device's area, and sends each device only
+// the vessels inside its own area. Your iPhone and iPad can then stream at the same time.
 //
 // The AisStream key comes from the app's Settings (subscribe message / X-AIS-Key header) or, when the
 // field is empty, from the secret AISSTREAM_API_KEY (wrangler secret put AISSTREAM_API_KEY).
-// The Worker never stores or logs a client key; it only passes it to AisStream.
+// The Worker never stores or logs a key; it only passes it to AisStream.
 // Vars: ALLOWED_ORIGINS (optional, comma-separated; empty allows any origin)
 
 const AIS_URL = 'https://stream.aisstream.io/v0/stream';
-let upstreamUrl = AIS_URL; // AIS_UPSTREAM_URL var overrides it, for local tests against a mock
 const MESSAGE_TYPES = ['PositionReport', 'StandardClassBPositionReport', 'ExtendedClassBPositionReport', 'ShipStaticData', 'StaticDataReport'];
-const FORWARD_MIN_MS = 2000; // per vessel, at most one position every 2 s to the phone
-const MAX_MMSI = 50;
-const IDLE_MS = 60000;        // no message from the phone for this long: free the AisStream connection         // AisStream's limit per subscription
+const FORWARD_MIN_MS = 2000;   // per device and vessel, at most one position every 2 s
+const MAX_MMSI = 50;           // AisStream's limit per subscription
+const IDLE_MS = 60000;         // no heartbeat from a device for this long: drop it (frozen tab)
+const GRACE_MS = 15000;        // keep the upstream this long after the last device leaves (quick reloads)
+const CACHE_MS = 30 * 60000;   // positions kept for snapshots and for devices that join late
+const MAX_BOXES = 20;
 
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
-    upstreamUrl = env.AIS_UPSTREAM_URL || AIS_URL;
     const cors = corsHeaders(request, env);
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
 
@@ -30,107 +36,240 @@ export default {
       return json({ ok: true, live: Boolean(env.AISSTREAM_API_KEY), version: meta.id ? String(meta.id).slice(0, 8) : 'dev', deployedAt: meta.timestamp || null },
         200, { ...cors, 'Cache-Control': 'no-store' });
     }
-    if (url.pathname === '/ws') {
-      if (!originAllowed(request, env)) return new Response('Origin not allowed', { status: 403 });
-      return handleSocket(request, env);
-    }
-    if (url.pathname === '/api/check') {
-      return handleCheck(request, env, cors);
-    }
-    if (url.pathname === '/api/snapshot') {
-      return handleSnapshot(request, url, env, cors);
+    if (url.pathname === '/ws' || url.pathname === '/api/check' || url.pathname === '/api/snapshot') {
+      if (url.pathname === '/ws') {
+        if (!originAllowed(request, env)) return new Response('Origin not allowed', { status: 403 });
+        if (request.headers.get('Upgrade') !== 'websocket') return new Response('Expected a WebSocket upgrade', { status: 426 });
+      }
+      const hub = env.HUB.get(env.HUB.idFromName('hub'));
+      const res = await hub.fetch(request);
+      if (url.pathname === '/ws') return res;
+      const out = new Response(res.body, res);
+      for (const [k, v] of Object.entries(cors)) out.headers.set(k, v);
+      return out;
     }
     if (env.ASSETS) return env.ASSETS.fetch(request);
     return new Response('Not found', { status: 404 });
   },
 };
 
-// ---------- WebSocket relay ----------
+// ---------- The hub (Durable Object) ----------
 
-function handleSocket(request, env) {
-  if (request.headers.get('Upgrade') !== 'websocket') {
-    return new Response('Expected a WebSocket upgrade', { status: 426 });
+export class AisHub {
+  constructor(state, env) {
+    this.env = env;
+    this.groups = new Map(); // apiKey -> { upstream, opening, clients:Set, filterJson, cache:Map, graceTimer, lastData }
+    this.idleTimer = null;
   }
-  const pair = new WebSocketPair();
-  const [client, server] = Object.values(pair);
-  server.accept();
 
-  // AisStream allows ONE connection per key at a time and briefly blocks a key that reconnects
-  // rapidly, so each phone gets a single upstream that is re-subscribed in place.
-  let upstream = null, upstreamKey = '', queue = Promise.resolve();
-  const lastSent = new Map();
-  const send = (obj) => { try { server.send(JSON.stringify(obj)); } catch {} };
-  const closeUpstream = () => { try { upstream?.close(); } catch {} upstream = null; };
+  async fetch(request) {
+    const url = new URL(request.url);
+    if (url.pathname === '/ws') return this.connect();
+    if (url.pathname === '/api/check') return this.check(request);
+    return this.snapshot(request, url);
+  }
 
-  const forward = (v) => {
-    // Static data (name, type) always goes through; positions are throttled per vessel.
+  group(key) {
+    let g = this.groups.get(key);
+    if (!g) { g = { upstream: null, opening: null, clients: new Set(), filterJson: '', cache: new Map(), seen: new Map(), graceTimer: null, lastData: 0 }; this.groups.set(key, g); }
+    return g;
+  }
+
+  // ----- devices -----
+
+  connect() {
+    const [client, server] = Object.values(new WebSocketPair());
+    server.accept();
+    const c = { ws: server, key: '', bbox: null, mmsi: [], lastSeen: Date.now(), lastSent: new Map() };
+    server.addEventListener('message', (event) => {
+      c.lastSeen = Date.now();
+      let msg;
+      try { msg = JSON.parse(event.data); } catch { return; }
+      if (msg.type === 'subscribe') this.subscribe(c, msg).catch(() => {});
+    });
+    const leave = () => this.leave(c);
+    server.addEventListener('close', leave);
+    server.addEventListener('error', leave);
+    this.startIdleChecks();
+    return new Response(null, { status: 101, webSocket: client });
+  }
+
+  async subscribe(c, msg) {
+    const key = pickKey(this.env, msg.apiKey);
+    if (!key) { send(c.ws, { type: 'error', message: 'No AisStream key. Add yours in Settings, or set AISSTREAM_API_KEY on the Worker.' }); return; }
+    const sub = sanitizeSubscription(msg);
+    if (c.key && c.key !== key) this.leaveGroup(c);
+    c.key = key; c.bbox = sub.bbox; c.mmsi = sub.mmsi;
+    const g = this.group(key);
+    g.clients.add(c);
+    clearTimeout(g.graceTimer); g.graceTimer = null;
+    // A device that joins a running stream gets what is already known in its area at once.
+    const since = Date.now() - CACHE_MS;
+    for (const v of g.cache.values()) if ((g.seen.get(v.mmsi) || 0) > since && wants(c, v)) this.forward(c, v);
+    await this.refresh(key);
+  }
+
+  leave(c) {
+    try { c.ws.close(); } catch {}
+    this.leaveGroup(c);
+  }
+
+  leaveGroup(c) {
+    const g = this.groups.get(c.key);
+    if (!g || !g.clients.delete(c)) return;
+    if (g.clients.size) { this.refresh(c.key).catch(() => {}); return; }
+    clearTimeout(g.graceTimer);
+    g.graceTimer = setTimeout(() => { if (!g.clients.size) this.closeUpstream(c.key); }, GRACE_MS);
+  }
+
+  startIdleChecks() {
+    if (this.idleTimer) return;
+    this.idleTimer = setInterval(() => {
+      let any = false;
+      for (const g of this.groups.values()) {
+        for (const c of g.clients) {
+          any = true;
+          if (Date.now() - c.lastSeen > IDLE_MS) { try { c.ws.close(1000, 'Idle'); } catch {} this.leaveGroup(c); }
+        }
+      }
+      if (!any) { clearInterval(this.idleTimer); this.idleTimer = null; }
+    }, 15000);
+  }
+
+  forward(c, v) {
     if (v.lat != null) {
       const now = Date.now();
-      if (now - (lastSent.get(v.mmsi) || 0) < FORWARD_MIN_MS) return;
-      lastSent.set(v.mmsi, now);
+      if (now - (c.lastSent.get(v.mmsi) || 0) < FORWARD_MIN_MS) return;
+      c.lastSent.set(v.mmsi, now);
     }
-    send({ type: 'vessel', v });
-  };
+    send(c.ws, { type: 'vessel', v });
+  }
 
-  const onUpstreamClosed = (why) => {
-    upstream = null;
-    send({ type: 'error', message: `AisStream closed the stream${why ? `: ${why}` : ''}. AisStream allows one connection per key, so close the app on other devices or tabs.` });
-    try { server.close(1011, 'Upstream closed'); } catch {}
-  };
+  // ----- the one upstream per key -----
 
-  const apply = async (msg) => {
-    const apiKey = pickKey(env, msg.apiKey);
-    if (!apiKey) { send({ type: 'error', message: 'No AisStream key. Add yours in Settings, or set AISSTREAM_API_KEY on the Worker.' }); return; }
-    const filter = subscriptionFilter(sanitizeSubscription(msg));
+  /** Subscribe the key's upstream to every device's area; open it if needed. */
+  async refresh(key) {
+    const g = this.group(key);
+    const filter = unionFilter([...g.clients]);
     if (!filter) return;
-    if (upstream && upstream.isOpen() && upstreamKey === apiKey) { upstream.update(filter); return; }
-    closeUpstream();
-    try {
-      upstream = await openUpstream(apiKey, filter, forward, onUpstreamClosed);
-      upstreamKey = apiKey;
-    } catch (err) {
-      send({ type: 'error', message: `Could not reach the AIS provider: ${err.message}` });
-      try { server.close(1011, 'Upstream unavailable'); } catch {}
+    const fj = JSON.stringify(filter);
+    if (g.opening) { await g.opening; if (g.upstream?.isOpen()) { if (fj !== g.filterJson) { g.upstream.update(filter); g.filterJson = fj; } return; } }
+    if (g.upstream?.isOpen()) {
+      if (fj !== g.filterJson) { g.upstream.update(filter); g.filterJson = fj; }
+      return;
     }
-  };
+    g.opening = openUpstream(this.env, key, filter, (v) => this.onVessel(key, v), (why) => this.onUpstreamClosed(key, why))
+      .then((u) => { g.upstream = u; g.filterJson = fj; })
+      .catch((err) => { for (const c of g.clients) { send(c.ws, { type: 'error', message: `Could not reach the AIS provider: ${err.message}` }); try { c.ws.close(1011, 'Upstream unavailable'); } catch {} } })
+      .finally(() => { g.opening = null; });
+    await g.opening;
+    // Areas may have changed while the connection was opening.
+    const now = unionFilter([...g.clients]);
+    if (g.upstream?.isOpen() && now && JSON.stringify(now) !== g.filterJson) { g.upstream.update(now); g.filterJson = JSON.stringify(now); }
+  }
 
-  // A phone that sleeps can leave its socket open while the page is frozen. Without its
-  // heartbeat (every 20 s) the Worker hangs up, so the key's one connection is not held by a ghost.
-  let lastSeen = Date.now();
-  const idleTimer = setInterval(() => {
-    if (Date.now() - lastSeen < IDLE_MS) return;
-    clearInterval(idleTimer);
-    closeUpstream();
-    try { server.close(1000, 'Idle'); } catch {}
-  }, 15000);
-  const shutDown = () => { clearInterval(idleTimer); closeUpstream(); };
+  onVessel(key, v) {
+    const g = this.groups.get(key);
+    if (!g) return;
+    g.lastData = Date.now();
+    const merged = { ...(g.cache.get(v.mmsi) || {}), ...v };
+    g.cache.set(v.mmsi, merged);
+    g.seen.set(v.mmsi, Date.now()); // when the Worker heard it; AIS timestamps can lag
+    if (g.cache.size > 5000) for (const [k] of g.cache) { if (Date.now() - (g.seen.get(k) || 0) > CACHE_MS) { g.cache.delete(k); g.seen.delete(k); } }
+    for (const c of g.clients) if (wants(c, merged)) this.forward(c, v.lat != null ? merged : v);
+  }
 
-  server.addEventListener('message', (event) => {
-    lastSeen = Date.now();
-    let msg;
-    try { msg = JSON.parse(event.data); } catch { return; }
-    if (msg.type !== 'subscribe') return;
-    queue = queue.then(() => apply(msg)).catch(() => {}); // one subscription change at a time
-  });
-  server.addEventListener('close', shutDown);
-  server.addEventListener('error', shutDown);
+  onUpstreamClosed(key, why) {
+    const g = this.groups.get(key);
+    if (!g) return;
+    g.upstream = null; g.filterJson = '';
+    for (const c of g.clients) {
+      send(c.ws, { type: 'error', message: `AisStream closed the stream${why ? `: ${why}` : ''}. If this key is also used outside this app, AisStream allows only one connection per key.` });
+      try { c.ws.close(1011, 'Upstream closed'); } catch {}
+    }
+    g.clients.clear();
+  }
 
-  return new Response(null, { status: 101, webSocket: client });
+  closeUpstream(key) {
+    const g = this.groups.get(key);
+    if (!g) return;
+    try { g.upstream?.close(); } catch {}
+    g.upstream = null; g.filterJson = '';
+  }
+
+  // ----- polling and the key check, without a second connection -----
+
+  async snapshot(request, url) {
+    const key = pickKey(this.env, request.headers.get('X-AIS-Key'));
+    if (!key) return json({ error: 'No AisStream key' }, 401);
+    const sub = sanitizeSubscription({ bbox: parseBbox(url.searchParams.get('bbox')), mmsi: (url.searchParams.get('mmsi') || '').split(',') });
+    if (!sub.bbox && !sub.mmsi.length) return json({ error: 'Give a bbox or a list of MMSIs' }, 400);
+    const g = this.group(key);
+    const seconds = Math.min(20, Math.max(3, Number(url.searchParams.get('seconds')) || 10));
+    if (!g.upstream?.isOpen()) {
+      // Nobody is streaming: listen as a temporary member of the group, then leave.
+      const probe = { ws: null, key, bbox: sub.bbox, mmsi: sub.mmsi, lastSeen: Date.now(), lastSent: new Map() };
+      g.clients.add(probe);
+      clearTimeout(g.graceTimer);
+      try { await this.refresh(key); await new Promise((r) => setTimeout(r, seconds * 1000)); } finally { this.leaveGroup(probe); }
+    }
+    const since = Date.now() - CACHE_MS;
+    const vessels = [...g.cache.values()].filter((v) => v.lat != null && (g.seen.get(v.mmsi) || 0) > since && wants({ bbox: sub.bbox, mmsi: sub.mmsi }, v));
+    return json({ at: new Date().toISOString(), vessels }, 200, { 'Cache-Control': 'no-store' });
+  }
+
+  async check(request) {
+    const { key, source } = pickKeyWithSource(this.env, request.headers.get('X-AIS-Key'));
+    if (!key) return json({ ok: false, source, message: 'No AisStream key. Add yours in Settings, or set AISSTREAM_API_KEY on the Worker.' });
+    const g = this.group(key);
+    const devices = [...g.clients].filter((c) => c.ws).length;
+    if (g.upstream?.isOpen()) {
+      // Never open a second connection next to a running one: AisStream would refuse it.
+      const quiet = Date.now() - g.lastData > 30000 ? ' No reports in the last 30 s, so the area may be quiet.' : '';
+      return json({ ok: true, source, key: maskKey(key), message: `AisStream accepted the key. It is streaming now to ${devices} device${devices === 1 ? '' : 's'}.${quiet}` });
+    }
+    // Not streaming: open the key's one connection briefly (worldwide, so reports arrive fast).
+    const result = await new Promise((resolve) => {
+      let u = null;
+      const timer = setTimeout(() => finish({ ok: true, message: 'AisStream kept the connection open but sent no reports in 8 s.' }), 8000);
+      const finish = (r) => { clearTimeout(timer); try { u?.close(); } catch {} resolve(r); };
+      openUpstream(this.env, key, { BoundingBoxes: [[[-90, -180], [90, 180]]] },
+        () => finish({ ok: true, message: 'AisStream accepted the key and is sending reports.' }),
+        (why) => finish({ ok: false, message: `AisStream refused the connection${why ? ` (${why})` : ''}. Either the key is wrong, or it is in use outside this app: AisStream allows one connection per key.` }))
+        .then((x) => { u = x; })
+        .catch((err) => finish({ ok: false, message: `Could not reach AisStream: ${err.message}` }));
+    });
+    return json({ ...result, source, key: maskKey(key) }, 200, { 'Cache-Control': 'no-store' });
+  }
+}
+
+const send = (ws, obj) => { if (ws) { try { ws.send(JSON.stringify(obj)); } catch {} } };
+
+/** Does this device want this vessel? Inside its box, or on its MMSI list when it has no box. */
+export function wants(c, v) {
+  if (v.lat == null) return true; // static data (names, types) is small; every device gets it
+  if (c.bbox) {
+    const [[s, w], [n, e]] = c.bbox;
+    return v.lat >= s && v.lat <= n && v.lon >= w && v.lon <= e;
+  }
+  return c.mmsi.includes(v.mmsi);
 }
 
 /**
- * The area around you. With only one connection per key there is no room for a separate
- * worldwide watchlist stream, so watched vessels show when they are inside the area.
- * Without an area (snapshot of MMSIs only) it follows those MMSIs worldwide.
+ * One AisStream subscription covering every device of a key: all their boxes (AisStream takes
+ * several). Devices without a box but with MMSIs (snapshots) fall back to a worldwide MMSI filter,
+ * which only works when no device has a box, since the filter would apply to every box.
  */
-export function subscriptionFilter(sub) {
-  if (sub.bbox) return { BoundingBoxes: [sub.bbox] };
-  if (sub.mmsi.length) return { BoundingBoxes: [[[-90, -180], [90, 180]]], FiltersShipMMSI: sub.mmsi };
+export function unionFilter(clients) {
+  const boxes = [...new Set(clients.filter((c) => c.bbox).map((c) => JSON.stringify(c.bbox)))].slice(0, MAX_BOXES).map((b) => JSON.parse(b));
+  if (boxes.length) return { BoundingBoxes: boxes };
+  const mmsi = [...new Set(clients.flatMap((c) => c.mmsi || []))].slice(0, MAX_MMSI);
+  if (mmsi.length) return { BoundingBoxes: [[[-90, -180], [90, 180]]], FiltersShipMMSI: mmsi };
   return null;
 }
 
-async function openUpstream(apiKey, filter, onVessel, onClosed) {
-  const resp = await fetch(upstreamUrl, { headers: { Upgrade: 'websocket' } });
+async function openUpstream(env, apiKey, filter, onVessel, onClosed) {
+  const resp = await fetch(env.AIS_UPSTREAM_URL || AIS_URL, { headers: { Upgrade: 'websocket' } }); // AIS_UPSTREAM_URL: local tests against a mock
   const ws = resp.webSocket;
   if (!ws) throw new Error(`upgrade refused (${resp.status})`);
   ws.accept();
@@ -148,8 +287,7 @@ async function openUpstream(apiKey, filter, onVessel, onClosed) {
   });
   ws.addEventListener('close', (event) => {
     if (closedByUs || !onClosed) return;
-    const why = upstreamError || event.reason || (event.code ? `close code ${event.code}` : '');
-    onClosed(why);
+    onClosed(upstreamError || event.reason || (event.code ? `close code ${event.code}` : ''));
   });
   return {
     close: () => { closedByUs = true; ws.close(); },
@@ -159,34 +297,7 @@ async function openUpstream(apiKey, filter, onVessel, onClosed) {
   };
 }
 
-// ---------- Snapshot (polling fallback) ----------
-
-async function handleSnapshot(request, url, env, cors) {
-  const apiKey = pickKey(env, request.headers.get('X-AIS-Key'));
-  if (!apiKey) return json({ error: 'No AisStream key' }, 401, cors);
-  const sub = sanitizeSubscription({
-    bbox: parseBbox(url.searchParams.get('bbox')),
-    mmsi: (url.searchParams.get('mmsi') || '').split(','),
-  });
-  if (!sub.bbox && !sub.mmsi.length) return json({ error: 'Give a bbox or a list of MMSIs' }, 400, cors);
-  const seconds = Math.min(20, Math.max(3, Number(url.searchParams.get('seconds')) || 10));
-
-  const latest = new Map();
-  const merge = (v) => latest.set(v.mmsi, { ...(latest.get(v.mmsi) || {}), ...v });
-  let upstream = null;
-  try {
-    upstream = await openUpstream(apiKey, subscriptionFilter(sub), merge);
-    await new Promise((r) => setTimeout(r, seconds * 1000));
-  } catch (err) {
-    return json({ error: `Could not reach the AIS provider: ${err.message}` }, 502, cors);
-  } finally {
-    try { upstream?.close(); } catch {}
-  }
-  const vessels = [...latest.values()].filter((v) => v.lat != null);
-  return json({ at: new Date().toISOString(), seconds, vessels }, 200, { ...cors, 'Cache-Control': 'no-store' });
-}
-
-// ---------- Parsing ----------
+// ---------- Keys ----------
 
 /** The key typed in the app wins; otherwise the Worker's own secret. */
 export function pickKeyWithSource(env, clientKey) {
@@ -200,24 +311,7 @@ export const pickKey = (env, clientKey) => pickKeyWithSource(env, clientKey).key
 /** Show a key without revealing it: first and last 4 characters plus its length. */
 export const maskKey = (k) => (k ? `${k.slice(0, 4)}…${k.slice(-4)} (${k.length} characters)` : '');
 
-// ---------- Key check ----------
-
-async function handleCheck(request, env, cors) {
-  const { key, source } = pickKeyWithSource(env, request.headers.get('X-AIS-Key'));
-  if (!key) return json({ ok: false, source, message: 'No AisStream key. Add yours in Settings, or set AISSTREAM_API_KEY on the Worker.' }, 200, cors);
-  let upstream = null;
-  const result = await new Promise((resolve) => {
-    const timer = setTimeout(() => resolve({ ok: true, message: 'AisStream kept the connection open but sent no reports in 8 s.' }), 8000);
-    const done = (r) => { clearTimeout(timer); resolve(r); };
-    openUpstream(key, { BoundingBoxes: [[[-90, -180], [90, 180]]] },
-      () => done({ ok: true, message: 'AisStream accepted the key and is sending reports.' }),
-      (why) => done({ ok: false, message: `AisStream refused the connection${why ? ` (${why})` : ''}. Either the key is wrong, or it is already in use: AisStream allows one connection per key.` }))
-      .then((u) => { upstream = u; })
-      .catch((err) => done({ ok: false, message: `Could not reach AisStream: ${err.message}` }));
-  });
-  try { upstream?.close(); } catch {}
-  return json({ ...result, source, key: maskKey(key) }, 200, { ...cors, 'Cache-Control': 'no-store' });
-}
+// ---------- Parsing ----------
 
 export function parseBbox(s) {
   if (!s) return null;
