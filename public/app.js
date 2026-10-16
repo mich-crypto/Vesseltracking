@@ -3,6 +3,7 @@ import {
   shipTypeLabel, formatLatLon, formatBearing,
 } from './geo.js';
 import { DemoFeed, DEMO_WATCH_SEED } from './feed.js';
+import { AisStreamFeed } from './ais.js';
 
 // ---------- Constants ----------
 const RENDER_MIN_MS = 2000;            // throttle: at most one re-render every 2 s
@@ -20,7 +21,7 @@ const store = {
   del(key) { try { localStorage.removeItem(key); } catch {} },
 };
 
-const DEFAULT_SETTINGS = { range: 10, alert: 2, theme: 'dark', labels: false, tab: 'list', filter: 'all' };
+const DEFAULT_SETTINGS = { source: 'demo', apiKey: '', retry: 15, range: 10, alert: 2, theme: 'dark', labels: false, tab: 'list', filter: 'all' };
 const settings = { ...DEFAULT_SETTINGS, ...store.get('vt.settings', {}) };
 const saveSettings = () => store.set('vt.settings', settings);
 
@@ -116,12 +117,16 @@ function render() {
 }
 
 // ---------- Status badge ----------
-const STATUS_LABEL = { demo: 'Demo', starting: 'Starting' };
+const STATUS_LABEL = { live: 'Live', reconnecting: 'Reconnecting', offline: 'Offline', error: 'Not connected', demo: 'Demo', starting: 'Starting' };
+let feedState = { state: 'starting', detail: '' };
 function setStatus(state, detail = '') {
+  feedState = { state, detail };
   const el = $('#status');
   el.className = `badge ${state}`;
   el.title = detail;
   el.lastElementChild.textContent = STATUS_LABEL[state] || state;
+  if (settings.tab === 'settings') renderSettings();
+  if (state === 'error' || state === 'offline') scheduleRender();
 }
 
 // ---------- Nearby list ----------
@@ -231,7 +236,11 @@ function renderList(rows) {
       ? ['None of your watchlist is in sight', 'Add vessels with the star on any card, or by MMSI in Watchlist.']
       : settings.filter === 'closing'
         ? ['Nobody is closing on you', 'Vessels with a CPA inside the next hour show up here.']
-        : [`No vessels within ${settings.range} NM`, 'Widen the traffic range in Settings, or wait for the next reports.'];
+        : feedState.state === 'error'
+          ? ['Not connected to AisStream', feedState.detail]
+          : feedState.state === 'offline' || feedState.state === 'reconnecting'
+            ? ['Waiting for the connection', feedState.detail || 'The list fills as soon as positions come in.']
+            : [`No vessels within ${settings.range} NM`, 'Widen the traffic range in Settings, or wait for the next reports.'];
     list.innerHTML = `<div class="card empty"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M3 17c2 1.5 4 1.5 6 0s4-1.5 6 0 4 1.5 6 0"/><path d="M12 3v10M8 7h8"/></svg><div class="t">${msg[0]}</div><div>${msg[1]}</div></div>`;
     return;
   }
@@ -464,6 +473,7 @@ function onWatchButton(e) {
 }
 
 function onWatchChanged() {
+  feed?.resubscribe?.();
   scheduleRender(true);
 }
 
@@ -501,9 +511,23 @@ function setSeg(id, value) {
 }
 
 function renderSettings() {
+  setSeg('seg-source', settings.source);
+  setSeg('seg-retry', settings.retry);
   setSeg('seg-range', settings.range);
   setSeg('seg-alert', settings.alert);
   setSeg('seg-theme', settings.theme);
+  $('#live-settings').hidden = settings.source !== 'live';
+  const key = $('#ais-key');
+  if (document.activeElement !== key && !key.value) key.value = settings.apiKey;
+  const out = $('#source-desc');
+  out.className = 'd';
+  if (settings.source === 'demo') out.textContent = 'Simulated traffic around your position. The vessels are fictional.';
+  else if (!settings.apiKey) out.textContent = 'Enter your AisStream key below and tap Connect.';
+  else {
+    out.textContent = `${STATUS_LABEL[feedState.state] || feedState.state}${feedState.detail ? `: ${feedState.detail}` : ''}`;
+    if (feedState.state === 'error') out.className = 'd err';
+    if (feedState.state === 'live') out.className = 'd good';
+  }
 }
 
 // ---------- Feed ----------
@@ -529,7 +553,15 @@ function startFeed() {
   for (const m of markers.values()) map?.removeLayer(m);
   markers.clear();
   didFit = false;
-  feed = new DemoFeed({ getCentre: centre, onVessel, onStatus: setStatus });
+  if (settings.source === 'live') {
+    if (!settings.apiKey) { feed = null; setStatus('error', 'Add your AisStream key in Settings.'); scheduleRender(true); return; }
+    feed = new AisStreamFeed({
+      apiKey: settings.apiKey, range: settings.range, retryMinutes: settings.retry, getCentre: centre,
+      getWatchMmsi: () => watch.filter((w) => w.mmsi).map((w) => w.mmsi), onVessel, onStatus: setStatus,
+    });
+  } else {
+    feed = new DemoFeed({ getCentre: centre, onVessel, onStatus: setStatus });
+  }
   feed.start();
   scheduleRender(true);
 }
@@ -545,8 +577,10 @@ function startGeo() {
     const sog = speed != null && !Number.isNaN(speed) ? speed * KN_PER_MS : null;
     me = { lat: latitude, lon: longitude, acc: accuracy, sog, cog: heading != null && !Number.isNaN(heading) ? heading : me?.cog ?? null, ts: p.timestamp, source: 'gps' };
     geoError = null;
+    feed?.moved?.(me);
     if (first) {
-      startFeed(); // re-centre the demo fleet on you
+      if (settings.source === 'demo') startFeed(); // re-centre the demo fleet on you
+      else feed?.resubscribe();
       if (map) map.setView([latitude, longitude], map.getZoom());
     }
     scheduleRender();
@@ -563,7 +597,7 @@ const TAB_TEXT = {
   list: ['Nearby', 'Vessels around you, closest first.'],
   map: ['Chart', 'Tap a vessel to see range, bearing and CPA.'],
   watch: ['Watchlist', 'Vessels you follow, wherever they are.'],
-  settings: ['Settings', 'Range, alerts and display.'],
+  settings: ['Settings', 'Data source, range, alerts and display.'],
 };
 function showTab(tab) {
   if (!TAB_TEXT[tab]) tab = 'list';
@@ -623,7 +657,29 @@ function wire() {
   });
 
   const seg = (id, fn) => $(`#${id}`).addEventListener('click', (e) => { const b = e.target.closest('button[data-v]'); if (b) { fn(b.dataset.v); saveSettings(); renderSettings(); } });
-  seg('seg-range', (v) => { settings.range = Number(v); didFit = false; scheduleRender(true); });
+  seg('seg-range', (v) => { settings.range = Number(v); feed?.setRange?.(settings.range); didFit = false; scheduleRender(true); });
+  seg('seg-source', (v) => {
+    if (v === settings.source) return;
+    settings.source = v;
+    if (v === 'live') { const before = watch.length; watch = watch.filter((w) => !w.demo); if (watch.length !== before) store.set('vt.watch', watch); }
+    startFeed();
+  });
+  seg('seg-retry', (v) => { settings.retry = Number(v); feed?.setRetryMinutes?.(settings.retry); });
+  $('#key-form').addEventListener('submit', (e) => {
+    e.preventDefault();
+    const key = $('#ais-key').value.trim();
+    if (!key) { $('#source-desc').className = 'd err'; $('#source-desc').textContent = 'Paste your key first.'; return; }
+    settings.apiKey = key; saveSettings();
+    startFeed(); renderSettings();
+  });
+  $('#btn-key-show').addEventListener('click', (e) => {
+    const k = $('#ais-key'); const show = k.type === 'password';
+    k.type = show ? 'text' : 'password';
+    e.currentTarget.textContent = show ? 'Hide' : 'Show';
+  });
+  $('#btn-key-forget').addEventListener('click', () => {
+    settings.apiKey = ''; $('#ais-key').value = ''; saveSettings(); startFeed(); renderSettings();
+  });
   seg('seg-alert', (v) => { settings.alert = Number(v); alerted.clear(); });
   seg('seg-theme', (v) => { settings.theme = v; applyTheme(); });
   matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => { if (settings.theme === 'system') applyTheme(); });

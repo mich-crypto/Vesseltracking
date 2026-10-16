@@ -113,8 +113,36 @@
     <section class="view" data-view="settings" hidden>
       <div class="stack">
         <div class="card">
-          <h3>Traffic</h3>
-          <div class="notice warn" style="margin-bottom:14px"><span class="ico">!</span><div class="grow">This version shows simulated demo traffic around your position. The vessels are fictional and nothing here is real.</div></div>
+          <h3>Data</h3>
+          <div class="setting">
+            <div class="t">Source</div>
+            <div class="seg" id="seg-source" role="group" aria-label="Data source">
+              <button type="button" data-v="demo">Demo traffic</button>
+              <button type="button" data-v="live">Live AIS</button>
+            </div>
+            <div class="d" id="source-desc"></div>
+          </div>
+          <div id="live-settings">
+            <form class="setting" id="key-form" autocomplete="off" novalidate>
+              <label class="f" for="ais-key"><span>AisStream API key</span>
+                <input id="ais-key" type="password" placeholder="Paste your key" spellcheck="false" autocapitalize="off" enterkeyhint="go">
+              </label>
+              <div style="display:flex;gap:8px;flex-wrap:wrap">
+                <button type="submit" class="btn small">Connect</button>
+                <button type="button" class="btn ghost small" id="btn-key-show">Show</button>
+                <button type="button" class="btn danger small" id="btn-key-forget">Forget key</button>
+              </div>
+              <p class="hint" style="margin-top:0">Get a free key at aisstream.io. It is kept only in this browser and sent only to AisStream.</p>
+            </form>
+            <div class="setting">
+              <div class="t">When the connection drops</div>
+              <div class="seg" id="seg-retry" role="group" aria-label="Retry interval when offline">
+                <button type="button" data-v="10">Retry every 10 min</button>
+                <button type="button" data-v="15">Retry every 15 min</button>
+              </div>
+              <div class="d">The app retries quickly a few times, then waits this long between tries offshore to save battery and data.</div>
+            </div>
+          </div>
           <div class="setting">
             <div class="t">Traffic range</div>
             <div class="seg" id="seg-range" role="group" aria-label="Traffic range">
@@ -123,7 +151,7 @@
               <button type="button" data-v="25">25 NM</button>
               <button type="button" data-v="50">50 NM</button>
             </div>
-            <div class="d">Vessels farther than this are left out of the list and the chart.</div>
+            <div class="d">Vessels farther than this are left out. Watchlist vessels always show.</div>
           </div>
         </div>
         <div class="card">
