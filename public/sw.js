@@ -1,5 +1,5 @@
 // Service worker: the app shell works offline; chart tiles are cached as you browse.
-const SHELL = 'vt-shell-v3';
+const SHELL = 'vt-shell-v4';
 const TILES = 'vt-tiles-v1';
 const MAX_TILES = 600;
 const SHELL_FILES = ['./', 'index.html', 'styles.css', 'app.js', 'feed.js', 'geo.js', 'manifest.webmanifest', 'icon.svg'];
@@ -44,7 +44,8 @@ self.addEventListener('fetch', (e) => {
   }
 
   // App shell and fonts: network first, cache as fallback so updates arrive.
-  e.respondWith(fetch(req).then((res) => {
+  // cache: 'no-cache' makes the browser check with the server every time, so a reload always gets the latest deploy.
+  e.respondWith(fetch(req, { cache: 'no-cache' }).then((res) => {
     if (res.ok && (url.origin === location.origin || /fonts\.(googleapis|gstatic)\.com|unpkg\.com/.test(url.host))) {
       const copy = res.clone();
       caches.open(SHELL).then((c) => c.put(req, copy));

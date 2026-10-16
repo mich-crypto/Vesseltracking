@@ -25,6 +25,7 @@ The Cloudflare Worker serves the app and relays AisStream, which refuses direct 
 - **Throttling**: the Worker forwards at most one position per vessel every 2 s.
 - **One connection per key**: AisStream allows a single connection per API key and briefly blocks a key that reconnects too fast. The Worker keeps one upstream per phone and changes its area in place. So use the live app on one device at a time, and watchlist vessels show when they are inside your traffic range.
 - **Performance**: re-renders are throttled to at most one every 2 s.
+- **Updates**: Settings → App shows the version you are running. When Cloudflare has deployed a newer one, a banner offers to reload, and *Reload app* clears the offline copy (a hard refresh for iOS).
 - **Offline**: a service worker caches the app shell and up to 600 chart tiles.
 
 Without location permission, distances are measured from the harbour mouth at Hoek van Holland.

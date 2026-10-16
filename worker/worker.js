@@ -1,6 +1,6 @@
 // Cloudflare Worker: serves the app and proxies AisStream.io so the API key never reaches the phone.
 //
-//   GET /api/health                  → { ok, live }  (live = the Worker has its own AIS key)
+//   GET /api/health                  → { ok, live, version, deployedAt }  (live = the Worker has its own AIS key)
 //   GET /api/check  (X-AIS-Key?)     → tries the key against AisStream: { ok, source, key, message }
 //   GET /ws  (WebSocket)             → client sends {type:"subscribe", bbox, mmsi, apiKey?}; server streams {type:"vessel", v}
 //   GET /api/snapshot?bbox=&mmsi=    → listens upstream for a few seconds, returns { vessels: [...] } (offshore polling)
@@ -26,7 +26,9 @@ export default {
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
 
     if (url.pathname === '/api/health') {
-      return json({ ok: true, live: Boolean(env.AISSTREAM_API_KEY) }, 200, cors);
+      const meta = env.CF_VERSION_METADATA || {};
+      return json({ ok: true, live: Boolean(env.AISSTREAM_API_KEY), version: meta.id ? String(meta.id).slice(0, 8) : 'dev', deployedAt: meta.timestamp || null },
+        200, { ...cors, 'Cache-Control': 'no-store' });
     }
     if (url.pathname === '/ws') {
       if (!originAllowed(request, env)) return new Response('Origin not allowed', { status: 403 });

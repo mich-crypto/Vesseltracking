@@ -775,6 +775,56 @@ function seedDemoWatch() {
   store.set('vt.watch', watch);
 }
 
+// ---------- Version and updates ----------
+// The version this tab is running is the deploy it loaded from. When the Worker reports a newer
+// deploy (an old tab, or an old service-worker copy), a banner offers to reload.
+let loadedVersion = null;
+
+function fmtDeployed(iso) {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  return `${pad2(d.getDate())}-${pad2(d.getMonth() + 1)}-${d.getFullYear()} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+}
+
+async function checkVersion() {
+  if (!location.protocol.startsWith('http')) return;
+  let h;
+  try {
+    const res = await fetch(new URL('api/health', location.href), { cache: 'no-store' });
+    if (!res.ok) throw new Error();
+    h = await res.json();
+  } catch {
+    if (!loadedVersion) $('#app-version').textContent = 'Version unknown (the server did not answer).';
+    return;
+  }
+  if (!h.version) return;
+  if (!loadedVersion) loadedVersion = h.version;
+  const when = h.deployedAt ? `, deployed ${fmtDeployed(h.deployedAt)}` : '';
+  $('#app-version').textContent = loadedVersion === h.version
+    ? `Version ${h.version}${when}. This is the latest.`
+    : `Version ${loadedVersion}. A newer one is out: ${h.version}${when}.`;
+  $('#update-banner').hidden = loadedVersion === h.version;
+}
+
+async function hardReload() {
+  // iOS has no hard reload: drop the service worker and its caches, then load fresh.
+  try { for (const r of (await navigator.serviceWorker?.getRegistrations?.()) || []) await r.unregister(); } catch {}
+  try { for (const k of await caches.keys()) await caches.delete(k); } catch {}
+  const u = new URL(location.href);
+  u.searchParams.set('v', Date.now().toString(36));
+  location.replace(u.href);
+}
+
+function wireUpdates() {
+  $('#btn-reload').addEventListener('click', hardReload);
+  $('#btn-update').addEventListener('click', hardReload);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) checkVersion(); });
+  setInterval(checkVersion, 10 * 60000);
+  checkVersion();
+  // Drop the ?v= marker from the address after a hard reload.
+  if (new URL(location.href).searchParams.has('v')) history.replaceState(null, '', location.pathname + location.hash);
+}
+
 function boot() {
   applyTheme();
   wire();
@@ -782,6 +832,7 @@ function boot() {
   seedDemoWatch();
   startGeo();
   startFeed();
+  wireUpdates();
   if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) {
     navigator.serviceWorker.register('sw.js').catch(() => {});
   }

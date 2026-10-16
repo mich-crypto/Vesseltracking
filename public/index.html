@@ -173,6 +173,15 @@
           </div>
         </div>
         <div class="card">
+          <h3>App</h3>
+          <div class="setting">
+            <div class="t">Version</div>
+            <div class="d num" id="app-version">Checking…</div>
+            <div><button type="button" class="btn ghost small" id="btn-reload">Reload app</button></div>
+            <div class="d">Clears the offline copy and loads the latest version. Your watchlist and settings stay.</div>
+          </div>
+        </div>
+        <div class="card">
           <h3>Display</h3>
           <div class="setting">
             <div class="t">Theme</div>
@@ -190,6 +199,10 @@
   </div>
 
   <div id="toast-host"></div>
+  <div class="toast ok" id="update-banner" role="status" hidden>
+    <span class="ico">↻</span><div style="flex:1;min-width:0"><b>New version available</b><span class="muted">Reload to use it.</span></div>
+    <button type="button" class="btn small" id="btn-update">Reload</button>
+  </div>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin></script>
   <script type="module" src="app.js"></script>
