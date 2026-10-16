@@ -518,6 +518,7 @@ function renderSettings() {
   $('#live-settings').hidden = settings.source !== 'live';
   const url = $('#server-url');
   if (document.activeElement !== url) url.value = settings.server;
+  if (parseServer(settings.server) === null) { $('#test-result').className = 'hint err'; $('#test-result').textContent = serverError(); }
   const key = $('#ais-key');
   if (document.activeElement !== key && !key.value) key.value = settings.apiKey;
   const out = $('#source-desc');
@@ -530,8 +531,34 @@ function renderSettings() {
   }
 }
 
+/**
+ * The Worker address from Settings: '' (this site), a full URL, or a bare host like
+ * vesseltracking.me.workers.dev. Anything else (an account ID, a key) returns null.
+ */
+function parseServer(input) {
+  const s = String(input || '').trim();
+  if (!s) return '';
+  const withScheme = /^https?:\/\//i.test(s) ? s : /^[a-z0-9-]+(\.[a-z0-9-]+)+(:\d+)?(\/.*)?$/i.test(s) ? `https://${s}` : null;
+  if (!withScheme) return null;
+  try { return new URL(withScheme).href; } catch { return null; }
+}
+
+function serverError() {
+  return 'That is not a web address. Enter your Worker address, like https://vesseltracking.<account>.workers.dev, or leave the field empty when the Worker serves this app.';
+}
+
+/** Read the Worker field; on a bad value show why and return false. */
+function takeServerField() {
+  const v = parseServer($('#server-url').value);
+  const out = $('#test-result');
+  if (v === null) { out.className = 'hint err'; out.textContent = serverError(); return false; }
+  settings.server = v;
+  $('#server-url').value = v;
+  return true;
+}
+
 function serverBase() {
-  const base = new URL(settings.server || '.', location.href);
+  const base = new URL(parseServer(settings.server) || '.', location.href); // an invalid stored value falls back to this site
   if (!base.pathname.endsWith('/')) base.pathname += '/';
   return base.href;
 }
@@ -675,8 +702,8 @@ function wire() {
   $('#key-form').addEventListener('submit', (e) => {
     e.preventDefault();
     const key = $('#ais-key').value.trim();
+    if (!takeServerField()) return;
     settings.apiKey = key;
-    settings.server = $('#server-url').value.trim();
     saveSettings();
     startFeed(); renderSettings();
   });
@@ -688,8 +715,10 @@ function wire() {
   $('#btn-test').addEventListener('click', async () => {
     const out = $('#test-result');
     out.className = 'hint';
+    if (!takeServerField()) return;
+    out.className = 'hint';
     out.textContent = 'Testing…';
-    settings.server = $('#server-url').value.trim(); saveSettings();
+    saveSettings();
     try {
       const h = await testServer(serverBase());
       out.className = 'hint good';
