@@ -153,6 +153,13 @@ export class LiveFeed {
   }
 }
 
+/** Ask the Worker to try the key against AisStream. */
+export async function checkKey(base, apiKey) {
+  const res = await fetch(new URL('api/check', base), { cache: 'no-store', headers: apiKey ? { 'X-AIS-Key': apiKey } : {} });
+  if (!res.ok) throw new Error(`The server answered ${res.status}.`);
+  return res.json();
+}
+
 /** Ask the server whether it is up and has an AIS key. */
 export async function testServer(base) {
   const res = await fetch(new URL('api/health', base), { cache: 'no-store' });

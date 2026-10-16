@@ -1,12 +1,13 @@
 // Cloudflare Worker: serves the app and proxies AisStream.io so the API key never reaches the phone.
 //
 //   GET /api/health                  → { ok, live }  (live = the Worker has its own AIS key)
+//   GET /api/check  (X-AIS-Key?)     → tries the key against AisStream: { ok, source, key, message }
 //   GET /ws  (WebSocket)             → client sends {type:"subscribe", bbox, mmsi, apiKey?}; server streams {type:"vessel", v}
 //   GET /api/snapshot?bbox=&mmsi=    → listens upstream for a few seconds, returns { vessels: [...] } (offshore polling)
 //   everything else                  → static files from ./public
 //
-// The AisStream key comes from the secret AISSTREAM_API_KEY (wrangler secret put AISSTREAM_API_KEY) or,
-// when that is not set, from the key the user enters in the app's Settings (subscribe message / X-AIS-Key header).
+// The AisStream key comes from the app's Settings (subscribe message / X-AIS-Key header) or, when the
+// field is empty, from the secret AISSTREAM_API_KEY (wrangler secret put AISSTREAM_API_KEY).
 // The Worker never stores or logs a client key; it only passes it to AisStream.
 // Vars: ALLOWED_ORIGINS (optional, comma-separated; empty allows any origin)
 
@@ -27,6 +28,9 @@ export default {
     if (url.pathname === '/ws') {
       if (!originAllowed(request, env)) return new Response('Origin not allowed', { status: 403 });
       return handleSocket(request, env);
+    }
+    if (url.pathname === '/api/check') {
+      return handleCheck(request, env, cors);
     }
     if (url.pathname === '/api/snapshot') {
       return handleSnapshot(request, url, env, cors);
@@ -69,8 +73,8 @@ function handleSocket(request, env) {
     if (!apiKey) { send({ type: 'error', message: 'No AisStream key. Add yours in Settings, or set AISSTREAM_API_KEY on the Worker.' }); return; }
     closeUpstreams();
     try {
-      upstreams = await openUpstreams(apiKey, sanitizeSubscription(msg), forward, () => {
-        send({ type: 'error', message: 'AisStream closed the stream. Check the key.' });
+      upstreams = await openUpstreams(apiKey, sanitizeSubscription(msg), forward, (why) => {
+        send({ type: 'error', message: `AisStream closed the stream${why ? `: ${why}` : ''}.` });
         try { server.close(1011, 'Upstream closed'); } catch {}
       });
     } catch (err) {
@@ -102,15 +106,20 @@ async function openUpstream(apiKey, filter, onVessel, onClosed) {
   ws.accept();
   ws.send(JSON.stringify({ APIKey: apiKey, FilterMessageTypes: MESSAGE_TYPES, ...filter }));
   const decoder = new TextDecoder();
-  let closedByUs = false;
+  let closedByUs = false, upstreamError = '';
   ws.addEventListener('message', (event) => {
     const text = typeof event.data === 'string' ? event.data : decoder.decode(event.data);
     let raw;
     try { raw = JSON.parse(text); } catch { return; }
+    if (raw && typeof raw.error === 'string') { upstreamError = raw.error; return; } // AisStream explains before it closes
     const v = parseAis(raw);
     if (v) onVessel(v);
   });
-  ws.addEventListener('close', () => { if (!closedByUs && onClosed) onClosed(); });
+  ws.addEventListener('close', (event) => {
+    if (closedByUs || !onClosed) return;
+    const why = upstreamError || event.reason || (event.code ? `close code ${event.code}` : '');
+    onClosed(why);
+  });
   return { close: () => { closedByUs = true; ws.close(); } };
 }
 
@@ -143,11 +152,35 @@ async function handleSnapshot(request, url, env, cors) {
 
 // ---------- Parsing ----------
 
-/** The Worker's own secret wins; otherwise the key the user typed in the app. */
-export function pickKey(env, clientKey) {
-  if (env.AISSTREAM_API_KEY) return env.AISSTREAM_API_KEY;
+/** The key typed in the app wins; otherwise the Worker's own secret. */
+export function pickKeyWithSource(env, clientKey) {
   const k = typeof clientKey === 'string' ? clientKey.trim() : '';
-  return /^[A-Za-z0-9_-]{8,128}$/.test(k) ? k : '';
+  if (/^[A-Za-z0-9_-]{8,128}$/.test(k)) return { key: k, source: 'settings' };
+  const secret = env.AISSTREAM_API_KEY ? String(env.AISSTREAM_API_KEY).trim() : ''; // a pasted secret often ends in a newline
+  return secret ? { key: secret, source: 'worker' } : { key: '', source: null };
+}
+export const pickKey = (env, clientKey) => pickKeyWithSource(env, clientKey).key;
+
+/** Show a key without revealing it: first and last 4 characters plus its length. */
+export const maskKey = (k) => (k ? `${k.slice(0, 4)}…${k.slice(-4)} (${k.length} characters)` : '');
+
+// ---------- Key check ----------
+
+async function handleCheck(request, env, cors) {
+  const { key, source } = pickKeyWithSource(env, request.headers.get('X-AIS-Key'));
+  if (!key) return json({ ok: false, source, message: 'No AisStream key. Add yours in Settings, or set AISSTREAM_API_KEY on the Worker.' }, 200, cors);
+  let upstream = null;
+  const result = await new Promise((resolve) => {
+    const timer = setTimeout(() => resolve({ ok: true, message: 'AisStream kept the connection open but sent no reports in 8 s.' }), 8000);
+    const done = (r) => { clearTimeout(timer); resolve(r); };
+    openUpstream(key, { BoundingBoxes: [[[-90, -180], [90, 180]]] },
+      () => done({ ok: true, message: 'AisStream accepted the key and is sending reports.' }),
+      (why) => done({ ok: false, message: `AisStream refused the key${why ? ` (${why})` : ''}.` }))
+      .then((u) => { upstream = u; })
+      .catch((err) => done({ ok: false, message: `Could not reach AisStream: ${err.message}` }));
+  });
+  try { upstream?.close(); } catch {}
+  return json({ ...result, source, key: maskKey(key) }, 200, { ...cors, 'Cache-Control': 'no-store' });
 }
 
 export function parseBbox(s) {

@@ -4,7 +4,7 @@ import {
   distanceNm, bearingDeg, relativeBearing, destinationPoint, cpa, bboxAround,
   isValidMmsi, normName, shipTypeLabel, formatLatLon, formatBearing,
 } from '../public/geo.js';
-import { parseAis, sanitizeSubscription, parseBbox, pickKey } from '../worker/worker.js';
+import { parseAis, sanitizeSubscription, parseBbox, pickKey, pickKeyWithSource, maskKey } from '../worker/worker.js';
 
 const near = (a, b, tol, msg) => assert.ok(Math.abs(a - b) <= tol, `${msg ?? ''} expected ${b} ± ${tol}, got ${a}`);
 
@@ -116,9 +116,11 @@ test('subscriptions are sanitised', () => {
   assert.equal(parseBbox('1,2,3'), null);
 });
 
-test('the Worker secret wins over a key from the app', () => {
-  assert.equal(pickKey({ AISSTREAM_API_KEY: 'server-key-123' }, 'client-key-456'), 'server-key-123');
+test('a key from the app wins over the Worker secret', () => {
+  assert.deepEqual(pickKeyWithSource({ AISSTREAM_API_KEY: 'server-key-123' }, 'client-key-456'), { key: 'client-key-456', source: 'settings' });
+  assert.deepEqual(pickKeyWithSource({ AISSTREAM_API_KEY: 'server-key-123\n' }, ''), { key: 'server-key-123', source: 'worker' });
   assert.equal(pickKey({}, ' client-key-456 '), 'client-key-456');
   assert.equal(pickKey({}, 'bad key with spaces'), '');
   assert.equal(pickKey({}, undefined), '');
+  assert.equal(maskKey('57b74732d5ec48a9bb4b4819ace8595e'), '57b7…595e (32 characters)');
 });

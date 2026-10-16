@@ -2,7 +2,7 @@ import {
   distanceNm, bearingDeg, relativeBearing, cpa, bboxAround, isValidMmsi, normName,
   shipTypeLabel, formatLatLon, formatBearing,
 } from './geo.js';
-import { LiveFeed, DemoFeed, DEMO_WATCH_SEED, testServer } from './feed.js';
+import { LiveFeed, DemoFeed, DEMO_WATCH_SEED, testServer, checkKey } from './feed.js';
 
 // ---------- Constants ----------
 const RENDER_MIN_MS = 2000;            // throttle: at most one re-render every 2 s
@@ -720,14 +720,21 @@ function wire() {
     out.textContent = 'Testing…';
     saveSettings();
     try {
-      const h = await testServer(serverBase());
-      out.className = 'hint good';
-      out.textContent = h.live
-        ? 'Connected. The Worker has its own AisStream key, so the key field is optional.'
-        : 'Connected. The Worker has no key of its own, so it uses the key you enter here.';
+      await testServer(serverBase());
     } catch {
       out.className = 'hint err';
       out.textContent = `Could not reach ${new URL(serverBase()).host}. Check the address and that the Worker is deployed.`;
+      return;
+    }
+    out.textContent = 'Worker reached. Trying the key with AisStream…';
+    try {
+      const r = await checkKey(serverBase(), $('#ais-key').value.trim());
+      const which = r.source === 'settings' ? `the key in Settings, ${r.key}` : r.source === 'worker' ? `the Worker secret, ${r.key}` : 'no key';
+      out.className = r.ok ? 'hint good' : 'hint err';
+      out.textContent = `${r.message} Used ${which}.`;
+    } catch {
+      out.className = 'hint err';
+      out.textContent = 'The Worker answered, but the key check failed. Deploy the latest Worker and try again.';
     }
   });
   $('#btn-key-forget').addEventListener('click', () => {
