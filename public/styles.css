@@ -125,7 +125,7 @@ h3 { font-size: 17px; line-height: 1.3; font-weight: 600; margin: 0 0 12px; lett
 .badge .dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; flex: none; }
 .badge.live { background: var(--ok-soft); color: var(--ok); }
 .badge.live .dot { animation: pulse 2s infinite; box-shadow: 0 0 0 0 var(--ok-soft); }
-.badge.reconnecting, .badge.demo { background: var(--warn-soft); color: var(--warn); }
+.badge.reconnecting, .badge.connecting, .badge.demo { background: var(--warn-soft); color: var(--warn); }
 .badge.reconnecting .dot { animation: blink 1s steps(2) infinite; }
 .badge.polling { background: var(--accent-soft); color: var(--accent); }
 .badge.offline, .badge.error { background: var(--alert-soft); color: var(--alert); font-weight: 600; }

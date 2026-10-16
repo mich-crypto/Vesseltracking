@@ -1,7 +1,164 @@
-// Data feed. For now there is only the demo simulator; a live AIS source can be added later
-// by implementing the same interface: start(), stop(), calling onVessel(partialVessel) and onStatus(state, detail).
+// Data feeds: live AIS through your Cloudflare Worker (WebSocket with REST polling fallback)
+// and a demo simulator. Both call onVessel(partialVessel) and onStatus(state, detail).
+//   states: 'live' | 'reconnecting' | 'polling' | 'offline' | 'error' | 'demo'
 
 import { destinationPoint, distanceNm, bearingDeg } from './geo.js';
+
+const WS_RETRIES_BEFORE_POLLING = 4;
+
+export class LiveFeed {
+  constructor({ base, apiKey, pollMinutes, getSubscription, onVessel, onStatus }) {
+    this.base = base;
+    this.apiKey = apiKey || '';
+    this.pollMinutes = pollMinutes;
+    this.getSubscription = getSubscription;
+    this.onVessel = onVessel;
+    this.onStatus = onStatus;
+    this.ws = null;
+    this.failures = 0;
+    this.timer = null;
+    this.pollTimer = null;
+    this.stopped = false;
+    this.onOnline = () => { this.failures = 0; this.connect(); };
+    this.onOffline = () => this.onStatus('offline', 'No network on this phone');
+  }
+
+  start() {
+    window.addEventListener('online', this.onOnline);
+    window.addEventListener('offline', this.onOffline);
+    this.connect();
+  }
+
+  stop() {
+    this.stopped = true;
+    window.removeEventListener('online', this.onOnline);
+    window.removeEventListener('offline', this.onOffline);
+    clearTimeout(this.timer);
+    clearInterval(this.pollTimer);
+    if (this.ws) { this.ws.onclose = null; this.ws.close(); }
+  }
+
+  /** Send a fresh subscription, e.g. after the watchlist changed or you moved. */
+  resubscribe() {
+    if (this.ws?.readyState === WebSocket.OPEN) {
+      const sub = this.getSubscription();
+      this.subCentre = sub.centre;
+      this.ws.send(JSON.stringify({ type: 'subscribe', bbox: sub.bbox, mmsi: sub.mmsi, ...(this.apiKey ? { apiKey: this.apiKey } : {}) }));
+    }
+  }
+
+  setRange() { this.resubscribe(); }
+  setRetryMinutes(m) { this.setPollMinutes(m); }
+
+  /** Ask for a new area once you have moved a quarter of the range. */
+  moved(pos) {
+    const sub = this.getSubscription();
+    if (this.subCentre && distanceNm(this.subCentre, pos) > sub.range / 4) this.resubscribe();
+  }
+
+  setPollMinutes(m) {
+    this.pollMinutes = m;
+    if (this.pollTimer) this.startPolling();
+  }
+
+  wsUrl() {
+    const u = new URL('ws', this.base);
+    u.protocol = u.protocol === 'https:' ? 'wss:' : 'ws:';
+    return u.href;
+  }
+
+  connect() {
+    if (this.stopped) return;
+    clearTimeout(this.timer);
+    if (this.ws) { this.ws.onclose = null; this.ws.close(); }
+    if (!navigator.onLine) { this.onStatus('offline', 'No network on this phone'); return; }
+    let ws;
+    try { ws = new WebSocket(this.wsUrl()); } catch { this.scheduleRetry(); return; }
+    this.ws = ws;
+    let gotData = false, serverError = null;
+    ws.onopen = () => {
+      this.onStatus('connecting', 'Waiting for the first AIS reports');
+      this.resubscribe();
+    };
+    ws.onmessage = (ev) => {
+      let msg;
+      try { msg = JSON.parse(ev.data); } catch { return; }
+      if (msg.type === 'vessel' && msg.v) {
+        if (!gotData) {
+          // Only real data counts as live; an open socket to the Worker is not enough.
+          gotData = true;
+          this.failures = 0;
+          this.rejections = 0;
+          this.stopPolling();
+          this.onStatus('live', 'Live stream');
+        }
+        this.onVessel(msg.v);
+      } else if (msg.type === 'error') {
+        serverError = msg.message || 'Server error';
+        this.onStatus('error', serverError);
+      }
+    };
+    ws.onclose = () => {
+      if (serverError && !gotData) {
+        // The key was refused (or missing). Stop after 3 in a row instead of retrying forever.
+        this.rejections = (this.rejections || 0) + 1;
+        if (this.rejections >= 3) { this.onStatus('error', `${serverError} Fix it in Settings and tap Connect.`); return; }
+      }
+      this.scheduleRetry();
+    };
+    ws.onerror = () => {}; // onclose follows
+  }
+
+  scheduleRetry() {
+    if (this.stopped) return;
+    this.failures += 1;
+    if (this.failures >= WS_RETRIES_BEFORE_POLLING) {
+      if (!this.pollTimer) this.startPolling();
+      return;
+    }
+    const delay = Math.min(16000, 1000 * 2 ** (this.failures - 1));
+    this.onStatus('reconnecting', `Reconnecting in ${Math.round(delay / 1000)} s`);
+    this.timer = setTimeout(() => this.connect(), delay);
+  }
+
+  startPolling() {
+    clearInterval(this.pollTimer);
+    const tick = async () => {
+      const ok = await this.pollOnce();
+      // Each poll is also a chance to get the live stream back.
+      if (ok) { this.failures = WS_RETRIES_BEFORE_POLLING - 1; this.connect(); }
+    };
+    this.pollTimer = setInterval(tick, this.pollMinutes * 60000);
+    tick();
+  }
+
+  stopPolling() { clearInterval(this.pollTimer); this.pollTimer = null; }
+
+  async pollOnce() {
+    const sub = this.getSubscription();
+    const u = new URL('api/snapshot', this.base);
+    if (sub.bbox) u.searchParams.set('bbox', sub.bbox.flat().map((n) => n.toFixed(4)).join(','));
+    if (sub.mmsi?.length) u.searchParams.set('mmsi', sub.mmsi.join(','));
+    try {
+      const res = await fetch(u, { cache: 'no-store', headers: this.apiKey ? { 'X-AIS-Key': this.apiKey } : {} });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      (data.vessels || []).forEach((v) => this.onVessel(v));
+      this.onStatus('polling', `Polling every ${this.pollMinutes} min`);
+      return true;
+    } catch {
+      this.onStatus('offline', navigator.onLine ? 'Server unreachable' : 'No network on this phone');
+      return false;
+    }
+  }
+}
+
+/** Ask the server whether it is up and has an AIS key. */
+export async function testServer(base) {
+  const res = await fetch(new URL('api/health', base), { cache: 'no-store' });
+  if (!res.ok) throw new Error(`The server answered ${res.status}.`);
+  return res.json();
+}
 
 // ---------- Demo traffic ----------
 

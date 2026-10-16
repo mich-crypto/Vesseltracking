@@ -124,6 +124,11 @@
           </div>
           <div id="live-settings">
             <form class="setting" id="key-form" autocomplete="off" novalidate>
+              <label class="f" for="server-url"><span>Cloudflare Worker</span>
+                <input id="server-url" type="url" placeholder="Leave empty when the Worker serves this app" inputmode="url" spellcheck="false" autocapitalize="off">
+              </label>
+              <div><button type="button" class="btn ghost small" id="btn-test">Test connection</button></div>
+              <p class="hint" id="test-result" style="margin-top:0">The Worker in this repo relays AisStream, which refuses direct connections from a browser.</p>
               <label class="f" for="ais-key"><span>AisStream API key</span>
                 <input id="ais-key" type="password" placeholder="Paste your key" spellcheck="false" autocapitalize="off" enterkeyhint="go">
               </label>
@@ -132,7 +137,7 @@
                 <button type="button" class="btn ghost small" id="btn-key-show">Show</button>
                 <button type="button" class="btn danger small" id="btn-key-forget">Forget key</button>
               </div>
-              <p class="hint" style="margin-top:0">Get a free key at aisstream.io. It is kept only in this browser and sent only to AisStream.</p>
+              <p class="hint" style="margin-top:0">Get a free key at aisstream.io. It is kept in this browser and sent only to your Worker, which passes it to AisStream. Leave it empty if the Worker has AISSTREAM_API_KEY set.</p>
             </form>
             <div class="setting">
               <div class="t">When the connection drops</div>
@@ -140,7 +145,7 @@
                 <button type="button" data-v="10">Retry every 10 min</button>
                 <button type="button" data-v="15">Retry every 15 min</button>
               </div>
-              <div class="d">The app retries quickly a few times, then waits this long between tries offshore to save battery and data.</div>
+              <div class="d">After a few quick reconnects the app asks the Worker for a snapshot on this interval, to save battery and data offshore.</div>
             </div>
           </div>
           <div class="setting">

@@ -1,9 +1,8 @@
 import {
-  distanceNm, bearingDeg, relativeBearing, cpa, isValidMmsi, normName,
+  distanceNm, bearingDeg, relativeBearing, cpa, bboxAround, isValidMmsi, normName,
   shipTypeLabel, formatLatLon, formatBearing,
 } from './geo.js';
-import { DemoFeed, DEMO_WATCH_SEED } from './feed.js';
-import { AisStreamFeed } from './ais.js';
+import { LiveFeed, DemoFeed, DEMO_WATCH_SEED, testServer } from './feed.js';
 
 // ---------- Constants ----------
 const RENDER_MIN_MS = 2000;            // throttle: at most one re-render every 2 s
@@ -21,7 +20,7 @@ const store = {
   del(key) { try { localStorage.removeItem(key); } catch {} },
 };
 
-const DEFAULT_SETTINGS = { source: 'demo', apiKey: '', retry: 15, range: 10, alert: 2, theme: 'dark', labels: false, tab: 'list', filter: 'all' };
+const DEFAULT_SETTINGS = { source: 'demo', server: '', apiKey: '', retry: 15, range: 10, alert: 2, theme: 'dark', labels: false, tab: 'list', filter: 'all' };
 const settings = { ...DEFAULT_SETTINGS, ...store.get('vt.settings', {}) };
 const saveSettings = () => store.set('vt.settings', settings);
 
@@ -117,7 +116,7 @@ function render() {
 }
 
 // ---------- Status badge ----------
-const STATUS_LABEL = { live: 'Live', reconnecting: 'Reconnecting', offline: 'Offline', error: 'Not connected', demo: 'Demo', starting: 'Starting' };
+const STATUS_LABEL = { live: 'Live', reconnecting: 'Reconnecting', connecting: 'Connecting', polling: 'Polling', offline: 'Offline', error: 'Not connected', demo: 'Demo', starting: 'Starting' };
 let feedState = { state: 'starting', detail: '' };
 function setStatus(state, detail = '') {
   feedState = { state, detail };
@@ -517,17 +516,29 @@ function renderSettings() {
   setSeg('seg-alert', settings.alert);
   setSeg('seg-theme', settings.theme);
   $('#live-settings').hidden = settings.source !== 'live';
+  const url = $('#server-url');
+  if (document.activeElement !== url) url.value = settings.server;
   const key = $('#ais-key');
   if (document.activeElement !== key && !key.value) key.value = settings.apiKey;
   const out = $('#source-desc');
   out.className = 'd';
   if (settings.source === 'demo') out.textContent = 'Simulated traffic around your position. The vessels are fictional.';
-  else if (!settings.apiKey) out.textContent = 'Enter your AisStream key below and tap Connect.';
   else {
     out.textContent = `${STATUS_LABEL[feedState.state] || feedState.state}${feedState.detail ? `: ${feedState.detail}` : ''}`;
     if (feedState.state === 'error') out.className = 'd err';
     if (feedState.state === 'live') out.className = 'd good';
   }
+}
+
+function serverBase() {
+  const base = new URL(settings.server || '.', location.href);
+  if (!base.pathname.endsWith('/')) base.pathname += '/';
+  return base.href;
+}
+
+function subscription() {
+  const c = centre();
+  return { centre: c, range: settings.range, bbox: bboxAround(c, settings.range), mmsi: watch.filter((w) => w.mmsi).map((w) => w.mmsi).slice(0, 50) };
 }
 
 // ---------- Feed ----------
@@ -554,11 +565,7 @@ function startFeed() {
   markers.clear();
   didFit = false;
   if (settings.source === 'live') {
-    if (!settings.apiKey) { feed = null; setStatus('error', 'Add your AisStream key in Settings.'); scheduleRender(true); return; }
-    feed = new AisStreamFeed({
-      apiKey: settings.apiKey, range: settings.range, retryMinutes: settings.retry, getCentre: centre,
-      getWatchMmsi: () => watch.filter((w) => w.mmsi).map((w) => w.mmsi), onVessel, onStatus: setStatus,
-    });
+    feed = new LiveFeed({ base: serverBase(), apiKey: settings.apiKey, pollMinutes: settings.retry, getSubscription: subscription, onVessel, onStatus: setStatus });
   } else {
     feed = new DemoFeed({ getCentre: centre, onVessel, onStatus: setStatus });
   }
@@ -668,14 +675,31 @@ function wire() {
   $('#key-form').addEventListener('submit', (e) => {
     e.preventDefault();
     const key = $('#ais-key').value.trim();
-    if (!key) { $('#source-desc').className = 'd err'; $('#source-desc').textContent = 'Paste your key first.'; return; }
-    settings.apiKey = key; saveSettings();
+    settings.apiKey = key;
+    settings.server = $('#server-url').value.trim();
+    saveSettings();
     startFeed(); renderSettings();
   });
   $('#btn-key-show').addEventListener('click', (e) => {
     const k = $('#ais-key'); const show = k.type === 'password';
     k.type = show ? 'text' : 'password';
     e.currentTarget.textContent = show ? 'Hide' : 'Show';
+  });
+  $('#btn-test').addEventListener('click', async () => {
+    const out = $('#test-result');
+    out.className = 'hint';
+    out.textContent = 'Testing…';
+    settings.server = $('#server-url').value.trim(); saveSettings();
+    try {
+      const h = await testServer(serverBase());
+      out.className = 'hint good';
+      out.textContent = h.live
+        ? 'Connected. The Worker has its own AisStream key, so the key field is optional.'
+        : 'Connected. The Worker has no key of its own, so it uses the key you enter here.';
+    } catch {
+      out.className = 'hint err';
+      out.textContent = `Could not reach ${new URL(serverBase()).host}. Check the address and that the Worker is deployed.`;
+    }
   });
   $('#btn-key-forget').addEventListener('click', () => {
     settings.apiKey = ''; $('#ais-key').value = ''; saveSettings(); startFeed(); renderSettings();

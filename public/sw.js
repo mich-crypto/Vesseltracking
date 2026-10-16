@@ -1,8 +1,8 @@
 // Service worker: the app shell works offline; chart tiles are cached as you browse.
-const SHELL = 'vt-shell-v2';
+const SHELL = 'vt-shell-v3';
 const TILES = 'vt-tiles-v1';
 const MAX_TILES = 600;
-const SHELL_FILES = ['./', 'index.html', 'styles.css', 'app.js', 'feed.js', 'ais.js', 'geo.js', 'manifest.webmanifest', 'icon.svg'];
+const SHELL_FILES = ['./', 'index.html', 'styles.css', 'app.js', 'feed.js', 'geo.js', 'manifest.webmanifest', 'icon.svg'];
 const CDN_FILES = ['https://unpkg.com/leaflet@1.9.4/dist/leaflet.css', 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js'];
 
 self.addEventListener('install', (e) => {
@@ -24,6 +24,7 @@ self.addEventListener('fetch', (e) => {
   const req = e.request;
   if (req.method !== 'GET') return;
   const url = new URL(req.url);
+  if (url.pathname.startsWith('/api/') || url.pathname === '/ws') return; // always live
 
   if (isTile(url)) {
     // Cache first, fill in the background.

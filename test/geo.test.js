@@ -4,7 +4,7 @@ import {
   distanceNm, bearingDeg, relativeBearing, destinationPoint, cpa, bboxAround,
   isValidMmsi, normName, shipTypeLabel, formatLatLon, formatBearing,
 } from '../public/geo.js';
-import { parseAis } from '../public/ais.js';
+import { parseAis, sanitizeSubscription, parseBbox, pickKey } from '../worker/worker.js';
 
 const near = (a, b, tol, msg) => assert.ok(Math.abs(a - b) <= tol, `${msg ?? ''} expected ${b} ± ${tol}, got ${a}`);
 
@@ -106,4 +106,19 @@ test('parseAis: static data and invalid input', () => {
   assert.deepEqual([v.name, v.type, v.dest, v.len], ['STELLA ORION', 80, 'GBIMM', 228]);
   assert.equal(parseAis({ MessageType: 'PositionReport', MetaData: { MMSI: 12 }, Message: {} }), null);
   assert.equal(parseAis({ MessageType: 'PositionReport', MetaData: { MMSI: 244670583 }, Message: { PositionReport: { Latitude: 91, Longitude: 181 } } }), null);
+});
+
+test('subscriptions are sanitised', () => {
+  const s = sanitizeSubscription({ bbox: [[-95, 4], [52, 200]], mmsi: ['244670583', 'abc', '244670583', 123456789] });
+  assert.deepEqual(s.bbox, [[-90, 4], [52, 180]]);
+  assert.deepEqual(s.mmsi, ['244670583', '123456789']);
+  assert.deepEqual(parseBbox('51.8,3.9,52.1,4.3'), [[51.8, 3.9], [52.1, 4.3]]);
+  assert.equal(parseBbox('1,2,3'), null);
+});
+
+test('the Worker secret wins over a key from the app', () => {
+  assert.equal(pickKey({ AISSTREAM_API_KEY: 'server-key-123' }, 'client-key-456'), 'server-key-123');
+  assert.equal(pickKey({}, ' client-key-456 '), 'client-key-456');
+  assert.equal(pickKey({}, 'bad key with spaces'), '');
+  assert.equal(pickKey({}, undefined), '');
 });
