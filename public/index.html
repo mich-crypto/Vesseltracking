@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Vessel Tracker</title>
+  <meta name="description" content="Live AIS traffic around you, a personal watchlist, and range and bearing to every vessel.">
+  <meta name="theme-color" content="#05060a">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icon-192.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;600&display=swap">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin>
+  <link rel="stylesheet" href="styles.css">
+  <script>
+    // Apply the saved theme before first paint (dark is the default).
+    try { const s = JSON.parse(localStorage.getItem('vt.settings') || '{}'); if (s.theme) document.documentElement.dataset.theme = s.theme; } catch {}
+  </script>
+</head>
+<body>
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <symbol id="i-ship" viewBox="0 0 24 24"><path d="M12 2.5 18 20l-6-3.2L6 20 12 2.5Z" fill="currentColor" stroke="none"/></symbol>
+    <symbol id="i-moored" viewBox="0 0 24 24"><circle cx="12" cy="12" r="6" fill="currentColor" stroke="none"/></symbol>
+    <symbol id="i-star" viewBox="0 0 24 24"><path d="m12 3.6 2.6 5.3 5.8.8-4.2 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8-4.2-4.1 5.8-.8L12 3.6Z"/></symbol>
+  </svg>
+
+  <nav class="tabs" aria-label="Views">
+    <button type="button" data-tab="list" class="active" aria-current="page">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h10"/></svg>Nearby
+    </button>
+    <button type="button" data-tab="map">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 4 3.5 6v14L9 18l6 2 5.5-2V4L15 6 9 4Z"/><path d="M9 4v14M15 6v14"/></svg>Chart
+    </button>
+    <button type="button" data-tab="watch">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12Z"/><circle cx="12" cy="12" r="3"/></svg>Watchlist
+      <span class="count" id="watch-count" hidden></span>
+    </button>
+    <button type="button" data-tab="settings">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z"/></svg>Settings
+    </button>
+  </nav>
+
+  <div class="wrap">
+    <header class="top" id="top">
+      <div class="top-row">
+        <div class="brand">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v11M8 7h8"/><path d="M4 14c1.5 4 4.5 6 8 6s6.5-2 8-6"/><path d="M4 14h3M17 14h3"/></svg>
+          Vessel tracker
+        </div>
+        <span class="badge" id="status" role="status" aria-live="polite"><i class="dot"></i><span>Starting</span></span>
+      </div>
+      <h2 id="title">Nearby</h2>
+      <p class="sub" id="subtitle">Vessels around you, closest first.</p>
+    </header>
+
+    <!-- Nearby (list) -->
+    <section class="view" data-view="list">
+      <div class="stack">
+        <div class="card own" id="own-card"></div>
+        <div class="grid kpis" id="kpis"></div>
+      </div>
+      <div class="chips" id="filters" role="group" aria-label="Filter vessels" style="margin-top:14px"></div>
+      <div class="section-h"><span>Nearest first</span><span id="list-meta"></span></div>
+      <div class="stack" id="vessel-list"></div>
+    </section>
+
+    <!-- Chart (map) -->
+    <section class="view" data-view="map" hidden>
+      <div class="card map-card">
+        <div id="map" role="region" aria-label="Chart of nearby vessels"></div>
+        <div class="map-tools">
+          <button type="button" class="round-btn" id="btn-recenter" aria-label="Centre on my position" title="Centre on my position">
+            <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/><circle cx="12" cy="12" r="7"/></svg>
+          </button>
+          <button type="button" class="round-btn" id="btn-fit" aria-label="Show all vessels" title="Show all vessels">
+            <svg viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>
+          </button>
+          <button type="button" class="round-btn" id="btn-labels" aria-label="Show vessel names" title="Show vessel names" aria-pressed="false">
+            <svg viewBox="0 0 24 24"><path d="M4 7V5h16v2M9 19h6M12 5v14"/></svg>
+          </button>
+        </div>
+        <div class="map-legend" aria-hidden="true">
+          <span><i style="background:var(--own)"></i>You</span>
+          <span><i style="background:var(--accent)"></i>Watchlist</span>
+          <span><i style="background:var(--warn)"></i>Closing</span>
+          <span><i style="background:var(--c7)"></i>Other</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- Watchlist -->
+    <section class="view" data-view="watch" hidden>
+      <div class="stack">
+        <form class="card" id="add-form" autocomplete="off" novalidate>
+          <h3>Add a vessel</h3>
+          <div class="field-row">
+            <label class="f" for="add-input"><span>MMSI or vessel name</span>
+              <input id="add-input" name="q" placeholder="e.g. 244670583 or NORDIC TERN" inputmode="text" enterkeyhint="done">
+            </label>
+            <button class="btn" type="submit" id="add-btn">Add</button>
+          </div>
+          <p class="hint" id="add-hint">An MMSI is the 9-digit number every AIS transponder sends. Names match the way AIS spells them.</p>
+        </form>
+        <div class="card" id="watch-list"></div>
+      </div>
+    </section>
+
+    <!-- Settings -->
+    <section class="view" data-view="settings" hidden>
+      <div class="stack">
+        <div class="card">
+          <h3>Data</h3>
+          <div class="setting">
+            <div class="t">Source</div>
+            <div class="seg" id="seg-source" role="group" aria-label="Data source">
+              <button type="button" data-v="demo">Demo traffic</button>
+              <button type="button" data-v="live">Live AIS</button>
+            </div>
+            <div class="d" id="source-desc"></div>
+          </div>
+          <div class="setting" id="server-setting">
+            <label class="f" for="server-url"><span>Live data server</span>
+              <input id="server-url" type="url" placeholder="Leave empty to use this site" inputmode="url" spellcheck="false">
+            </label>
+            <div><button type="button" class="btn ghost small" id="btn-test">Test connection</button></div>
+            <p class="hint" id="test-result">The server is the Cloudflare Worker in this repo. It keeps your AIS key off the phone.</p>
+          </div>
+          <div class="setting">
+            <div class="t">Traffic range</div>
+            <div class="seg" id="seg-range" role="group" aria-label="Traffic range">
+              <button type="button" data-v="5">5 NM</button>
+              <button type="button" data-v="10">10 NM</button>
+              <button type="button" data-v="25">25 NM</button>
+              <button type="button" data-v="50">50 NM</button>
+            </div>
+            <div class="d">Vessels farther than this are left out. Watchlist vessels always show.</div>
+          </div>
+          <div class="setting">
+            <div class="t">Offshore polling</div>
+            <div class="seg" id="seg-poll" role="group" aria-label="Offshore polling interval">
+              <button type="button" data-v="10">Every 10 min</button>
+              <button type="button" data-v="15">Every 15 min</button>
+            </div>
+            <div class="d">When the live stream drops, the app asks for a snapshot on this interval to save battery and data.</div>
+          </div>
+        </div>
+        <div class="card">
+          <h3>Alerts</h3>
+          <div class="setting">
+            <div class="t">Watchlist proximity</div>
+            <div class="seg" id="seg-alert" role="group" aria-label="Proximity alert range">
+              <button type="button" data-v="0">Off</button>
+              <button type="button" data-v="1">1 NM</button>
+              <button type="button" data-v="2">2 NM</button>
+              <button type="button" data-v="5">5 NM</button>
+            </div>
+            <div class="d">You get a banner and a vibration when a watched vessel comes inside this range. Mute a vessel in the watchlist to silence it.</div>
+          </div>
+        </div>
+        <div class="card">
+          <h3>Display</h3>
+          <div class="setting">
+            <div class="t">Theme</div>
+            <div class="seg" id="seg-theme" role="group" aria-label="Theme">
+              <button type="button" data-v="dark">Dark</button>
+              <button type="button" data-v="light">Light</button>
+              <button type="button" data-v="system">System</button>
+            </div>
+            <div class="d">Dark keeps your night vision on deck and saves battery on OLED screens.</div>
+          </div>
+          <div class="setting">
+            <div class="t">Stored data</div>
+            <div class="d">The watchlist and the last known positions stay on this phone only.</div>
+            <div><button type="button" class="btn danger small" id="btn-clear">Clear stored positions</button></div>
+          </div>
+        </div>
+        <p class="hint" style="text-align:center">AIS data can be delayed or missing. Never use this app for navigation or collision avoidance.</p>
+      </div>
+    </section>
+  </div>
+
+  <div id="toast-host"></div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin></script>
+  <script type="module" src="app.js"></script>
+</body>
+</html>
