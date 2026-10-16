@@ -239,7 +239,9 @@ function renderList(rows) {
           ? ['Not connected to AisStream', feedState.detail]
           : feedState.state === 'offline' || feedState.state === 'reconnecting'
             ? ['Waiting for the connection', feedState.detail || 'The list fills as soon as positions come in.']
-            : [`No vessels within ${settings.range} NM`, 'Widen the traffic range in Settings, or wait for the next reports.'];
+            : feedState.state === 'live' || feedState.state === 'connecting'
+              ? [`Listening for ships within ${settings.range} NM`, `Ships under way report every few seconds, moored ships only every 3 minutes, so the list fills over the first minutes. If it stays empty, AisStream may have no receiving station near you. Try ${settings.range < 50 ? 'a wider range in Settings' : 'again near a port'}.`]
+              : [`No vessels within ${settings.range} NM`, 'Widen the traffic range in Settings, or wait for the next reports.'];
     list.innerHTML = `<div class="card empty"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M3 17c2 1.5 4 1.5 6 0s4-1.5 6 0 4 1.5 6 0"/><path d="M12 3v10M8 7h8"/></svg><div class="t">${msg[0]}</div><div>${msg[1]}</div></div>`;
     return;
   }
