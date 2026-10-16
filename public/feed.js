@@ -116,7 +116,8 @@ export class LiveFeed {
       if (!this.pollTimer) this.startPolling();
       return;
     }
-    const delay = Math.min(16000, 1000 * 2 ** (this.failures - 1));
+    // Slow enough that AisStream does not block the key for reconnecting too fast: 3, 6, 12 s.
+    const delay = Math.min(24000, 3000 * 2 ** (this.failures - 1));
     this.onStatus('reconnecting', `Reconnecting in ${Math.round(delay / 1000)} s`);
     this.timer = setTimeout(() => this.connect(), delay);
   }

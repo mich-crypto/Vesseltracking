@@ -12,6 +12,7 @@
 // Vars: ALLOWED_ORIGINS (optional, comma-separated; empty allows any origin)
 
 const AIS_URL = 'https://stream.aisstream.io/v0/stream';
+let upstreamUrl = AIS_URL; // AIS_UPSTREAM_URL var overrides it, for local tests against a mock
 const MESSAGE_TYPES = ['PositionReport', 'StandardClassBPositionReport', 'ExtendedClassBPositionReport', 'ShipStaticData', 'StaticDataReport'];
 const FORWARD_MIN_MS = 2000; // per vessel, at most one position every 2 s to the phone
 const MAX_MMSI = 50;         // AisStream's limit per subscription
@@ -19,6 +20,7 @@ const MAX_MMSI = 50;         // AisStream's limit per subscription
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
+    upstreamUrl = env.AIS_UPSTREAM_URL || AIS_URL;
     const cors = corsHeaders(request, env);
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
 
@@ -50,10 +52,12 @@ function handleSocket(request, env) {
   const [client, server] = Object.values(pair);
   server.accept();
 
-  let upstreams = [];
+  // AisStream allows ONE connection per key at a time and briefly blocks a key that reconnects
+  // rapidly, so each phone gets a single upstream that is re-subscribed in place.
+  let upstream = null, upstreamKey = '', queue = Promise.resolve();
   const lastSent = new Map();
   const send = (obj) => { try { server.send(JSON.stringify(obj)); } catch {} };
-  const closeUpstreams = () => { upstreams.forEach((u) => { try { u.close(); } catch {} }); upstreams = []; };
+  const closeUpstream = () => { try { upstream?.close(); } catch {} upstream = null; };
 
   const forward = (v) => {
     // Static data (name, type) always goes through; positions are throttled per vessel.
@@ -65,46 +69,58 @@ function handleSocket(request, env) {
     send({ type: 'vessel', v });
   };
 
-  server.addEventListener('message', async (event) => {
-    let msg;
-    try { msg = JSON.parse(event.data); } catch { return; }
-    if (msg.type !== 'subscribe') return;
+  const onUpstreamClosed = (why) => {
+    upstream = null;
+    send({ type: 'error', message: `AisStream closed the stream${why ? `: ${why}` : ''}. AisStream allows one connection per key, so close the app on other devices or tabs.` });
+    try { server.close(1011, 'Upstream closed'); } catch {}
+  };
+
+  const apply = async (msg) => {
     const apiKey = pickKey(env, msg.apiKey);
     if (!apiKey) { send({ type: 'error', message: 'No AisStream key. Add yours in Settings, or set AISSTREAM_API_KEY on the Worker.' }); return; }
-    closeUpstreams();
+    const filter = subscriptionFilter(sanitizeSubscription(msg));
+    if (!filter) return;
+    if (upstream && upstream.isOpen() && upstreamKey === apiKey) { upstream.update(filter); return; }
+    closeUpstream();
     try {
-      upstreams = await openUpstreams(apiKey, sanitizeSubscription(msg), forward, (why) => {
-        send({ type: 'error', message: `AisStream closed the stream${why ? `: ${why}` : ''}.` });
-        try { server.close(1011, 'Upstream closed'); } catch {}
-      });
+      upstream = await openUpstream(apiKey, filter, forward, onUpstreamClosed);
+      upstreamKey = apiKey;
     } catch (err) {
       send({ type: 'error', message: `Could not reach the AIS provider: ${err.message}` });
       try { server.close(1011, 'Upstream unavailable'); } catch {}
     }
+  };
+
+  server.addEventListener('message', (event) => {
+    let msg;
+    try { msg = JSON.parse(event.data); } catch { return; }
+    if (msg.type !== 'subscribe') return;
+    queue = queue.then(() => apply(msg)).catch(() => {}); // one subscription change at a time
   });
-  server.addEventListener('close', closeUpstreams);
-  server.addEventListener('error', closeUpstreams);
+  server.addEventListener('close', closeUpstream);
+  server.addEventListener('error', closeUpstream);
 
   return new Response(null, { status: 101, webSocket: client });
 }
 
 /**
- * One upstream for the area around you and, when the watchlist has MMSIs, one worldwide
- * stream filtered to those MMSIs (so watched vessels show even when far away).
+ * The area around you. With only one connection per key there is no room for a separate
+ * worldwide watchlist stream, so watched vessels show when they are inside the area.
+ * Without an area (snapshot of MMSIs only) it follows those MMSIs worldwide.
  */
-async function openUpstreams(apiKey, sub, onVessel, onClosed) {
-  const plans = [];
-  if (sub.bbox) plans.push({ BoundingBoxes: [sub.bbox] });
-  if (sub.mmsi.length) plans.push({ BoundingBoxes: [[[-90, -180], [90, 180]]], FiltersShipMMSI: sub.mmsi });
-  return Promise.all(plans.map((p) => openUpstream(apiKey, p, onVessel, onClosed)));
+export function subscriptionFilter(sub) {
+  if (sub.bbox) return { BoundingBoxes: [sub.bbox] };
+  if (sub.mmsi.length) return { BoundingBoxes: [[[-90, -180], [90, 180]]], FiltersShipMMSI: sub.mmsi };
+  return null;
 }
 
 async function openUpstream(apiKey, filter, onVessel, onClosed) {
-  const resp = await fetch(AIS_URL, { headers: { Upgrade: 'websocket' } });
+  const resp = await fetch(upstreamUrl, { headers: { Upgrade: 'websocket' } });
   const ws = resp.webSocket;
   if (!ws) throw new Error(`upgrade refused (${resp.status})`);
   ws.accept();
-  ws.send(JSON.stringify({ APIKey: apiKey, FilterMessageTypes: MESSAGE_TYPES, ...filter }));
+  const subscribe = (f) => ws.send(JSON.stringify({ APIKey: apiKey, FilterMessageTypes: MESSAGE_TYPES, ...f }));
+  subscribe(filter);
   const decoder = new TextDecoder();
   let closedByUs = false, upstreamError = '';
   ws.addEventListener('message', (event) => {
@@ -120,7 +136,12 @@ async function openUpstream(apiKey, filter, onVessel, onClosed) {
     const why = upstreamError || event.reason || (event.code ? `close code ${event.code}` : '');
     onClosed(why);
   });
-  return { close: () => { closedByUs = true; ws.close(); } };
+  return {
+    close: () => { closedByUs = true; ws.close(); },
+    // "Resending a subscription replaces the active configuration" (AisStream docs).
+    update: (f) => subscribe(f),
+    isOpen: () => ws.readyState === 1,
+  };
 }
 
 // ---------- Snapshot (polling fallback) ----------
@@ -137,14 +158,14 @@ async function handleSnapshot(request, url, env, cors) {
 
   const latest = new Map();
   const merge = (v) => latest.set(v.mmsi, { ...(latest.get(v.mmsi) || {}), ...v });
-  let upstreams = [];
+  let upstream = null;
   try {
-    upstreams = await openUpstreams(apiKey, sub, merge);
+    upstream = await openUpstream(apiKey, subscriptionFilter(sub), merge);
     await new Promise((r) => setTimeout(r, seconds * 1000));
   } catch (err) {
     return json({ error: `Could not reach the AIS provider: ${err.message}` }, 502, cors);
   } finally {
-    upstreams.forEach((u) => { try { u.close(); } catch {} });
+    try { upstream?.close(); } catch {}
   }
   const vessels = [...latest.values()].filter((v) => v.lat != null);
   return json({ at: new Date().toISOString(), seconds, vessels }, 200, { ...cors, 'Cache-Control': 'no-store' });
@@ -175,7 +196,7 @@ async function handleCheck(request, env, cors) {
     const done = (r) => { clearTimeout(timer); resolve(r); };
     openUpstream(key, { BoundingBoxes: [[[-90, -180], [90, 180]]] },
       () => done({ ok: true, message: 'AisStream accepted the key and is sending reports.' }),
-      (why) => done({ ok: false, message: `AisStream refused the key${why ? ` (${why})` : ''}.` }))
+      (why) => done({ ok: false, message: `AisStream refused the connection${why ? ` (${why})` : ''}. Either the key is wrong, or it is already in use: AisStream allows one connection per key.` }))
       .then((u) => { upstream = u; })
       .catch((err) => done({ ok: false, message: `Could not reach AisStream: ${err.message}` }));
   });

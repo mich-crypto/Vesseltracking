@@ -4,7 +4,7 @@ import {
   distanceNm, bearingDeg, relativeBearing, destinationPoint, cpa, bboxAround,
   isValidMmsi, normName, shipTypeLabel, formatLatLon, formatBearing,
 } from '../public/geo.js';
-import { parseAis, sanitizeSubscription, parseBbox, pickKey, pickKeyWithSource, maskKey } from '../worker/worker.js';
+import { parseAis, sanitizeSubscription, parseBbox, pickKey, pickKeyWithSource, maskKey, subscriptionFilter } from '../worker/worker.js';
 
 const near = (a, b, tol, msg) => assert.ok(Math.abs(a - b) <= tol, `${msg ?? ''} expected ${b} ± ${tol}, got ${a}`);
 
@@ -123,4 +123,10 @@ test('a key from the app wins over the Worker secret', () => {
   assert.equal(pickKey({}, 'bad key with spaces'), '');
   assert.equal(pickKey({}, undefined), '');
   assert.equal(maskKey('57b74732d5ec48a9bb4b4819ace8595e'), '57b7…595e (32 characters)');
+});
+
+test('one upstream subscription: the area, or MMSIs worldwide without an area', () => {
+  assert.deepEqual(subscriptionFilter({ bbox: [[51, 3], [52, 4]], mmsi: ['244670583'] }), { BoundingBoxes: [[[51, 3], [52, 4]]] });
+  assert.deepEqual(subscriptionFilter({ bbox: null, mmsi: ['244670583'] }), { BoundingBoxes: [[[-90, -180], [90, 180]]], FiltersShipMMSI: ['244670583'] });
+  assert.equal(subscriptionFilter({ bbox: null, mmsi: [] }), null);
 });

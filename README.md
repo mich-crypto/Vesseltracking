@@ -21,8 +21,9 @@ The Cloudflare Worker serves the app and relays AisStream, which refuses direct 
 - **Watchlist**: add a vessel by MMSI or by name. Each vessel has a *Show on chart* switch, an *Alerts* switch (mute) and *Remove*. Everything is stored in `localStorage`.
 - **Alerts**: a banner and a vibration when a watched vessel comes within 1, 2 or 5 NM.
 - **Connection badge**: Live (green, only once real reports arrive), Connecting and Reconnecting (amber), Polling (teal), Offline and Not connected (red), Demo.
-- **Offshore**: after 4 quick reconnects (1, 2, 4, 8 s) the app asks the Worker for a snapshot every 10 or 15 minutes, and each poll also tries to get the stream back. If AisStream refuses the key 3 times in a row, the app stops and shows the reason in Settings.
+- **Offshore**: after 4 quick reconnects (3, 6, 12 s) the app asks the Worker for a snapshot every 10 or 15 minutes, and each poll also tries to get the stream back. If AisStream refuses the key 3 times in a row, the app stops and shows the reason in Settings.
 - **Throttling**: the Worker forwards at most one position per vessel every 2 s.
+- **One connection per key**: AisStream allows a single connection per API key and briefly blocks a key that reconnects too fast. The Worker keeps one upstream per phone and changes its area in place. So use the live app on one device at a time, and watchlist vessels show when they are inside your traffic range.
 - **Performance**: re-renders are throttled to at most one every 2 s.
 - **Offline**: a service worker caches the app shell and up to 600 chart tiles.
 

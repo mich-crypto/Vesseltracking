@@ -412,7 +412,7 @@ function renderWatch(rows) {
       const sub = [w.mmsi ? `MMSI ${w.mmsi}` : 'Matched by name', r ? shipTypeLabel(r.v.type) : null].filter(Boolean).join(' · ');
       const where = r
         ? `${fmtNm(r.dist)} NM<small>${formatBearing(bearingDeg(centre(), r.v))} T · ${fmtAge(r.v.ts)}</small>`
-        : `<span class="muted">Not seen</span><small>${w.mmsi ? 'not in the traffic' : `only within ${settings.range} NM`}</small>`;
+        : `<span class="muted">Not seen</span><small>shows within ${settings.range} NM</small>`;
       return `<div class="wrow">
         <div style="min-width:0"><div class="wn">${esc(title)}${w.demo ? ' <span class="pill warn">Demo</span>' : ''}</div><div class="wm">${esc(sub)}</div></div>
         <div class="wd">${where}</div>
@@ -451,7 +451,7 @@ function addWatch(input) {
   watch.unshift({ id: `w${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`, ...entry, muted: false, visible: true, added: Date.now() });
   saveWatch();
   hint.className = 'hint good';
-  hint.textContent = entry.mmsi ? `Added. Watching MMSI ${entry.mmsi} wherever it is.` : `Added. ${entry.name} shows up when it is within ${settings.range} NM.`;
+  hint.textContent = `Added. ${entry.mmsi ? `MMSI ${entry.mmsi}` : entry.name} shows up when it is within ${settings.range} NM.`;
   return true;
 }
 
@@ -630,7 +630,7 @@ function startGeo() {
 const TAB_TEXT = {
   list: ['Nearby', 'Vessels around you, closest first.'],
   map: ['Chart', 'Tap a vessel to see range, bearing and CPA.'],
-  watch: ['Watchlist', 'Vessels you follow, wherever they are.'],
+  watch: ['Watchlist', 'Vessels you follow. They show when they are in range.'],
   settings: ['Settings', 'Data source, range, alerts and display.'],
 };
 function showTab(tab) {
@@ -727,6 +727,9 @@ function wire() {
       return;
     }
     out.textContent = 'Worker reached. Trying the key with AisStream…';
+    // AisStream allows one connection per key: pause the live stream while the check runs.
+    const wasLive = feed instanceof LiveFeed;
+    if (wasLive) { feed.stop(); feed = null; await new Promise((r) => setTimeout(r, 2000)); }
     try {
       const r = await checkKey(serverBase(), $('#ais-key').value.trim());
       const which = r.source === 'settings' ? `the key in Settings, ${r.key}` : r.source === 'worker' ? `the Worker secret, ${r.key}` : 'no key';
@@ -736,6 +739,7 @@ function wire() {
       out.className = 'hint err';
       out.textContent = 'The Worker answered, but the key check failed. Deploy the latest Worker and try again.';
     }
+    if (wasLive) setTimeout(startFeed, 2000);
   });
   $('#btn-key-forget').addEventListener('click', () => {
     settings.apiKey = ''; $('#ais-key').value = ''; saveSettings(); startFeed(); renderSettings();
