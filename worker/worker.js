@@ -15,7 +15,8 @@ const AIS_URL = 'https://stream.aisstream.io/v0/stream';
 let upstreamUrl = AIS_URL; // AIS_UPSTREAM_URL var overrides it, for local tests against a mock
 const MESSAGE_TYPES = ['PositionReport', 'StandardClassBPositionReport', 'ExtendedClassBPositionReport', 'ShipStaticData', 'StaticDataReport'];
 const FORWARD_MIN_MS = 2000; // per vessel, at most one position every 2 s to the phone
-const MAX_MMSI = 50;         // AisStream's limit per subscription
+const MAX_MMSI = 50;
+const IDLE_MS = 60000;        // no message from the phone for this long: free the AisStream connection         // AisStream's limit per subscription
 
 export default {
   async fetch(request, env) {
@@ -91,14 +92,26 @@ function handleSocket(request, env) {
     }
   };
 
+  // A phone that sleeps can leave its socket open while the page is frozen. Without its
+  // heartbeat (every 20 s) the Worker hangs up, so the key's one connection is not held by a ghost.
+  let lastSeen = Date.now();
+  const idleTimer = setInterval(() => {
+    if (Date.now() - lastSeen < IDLE_MS) return;
+    clearInterval(idleTimer);
+    closeUpstream();
+    try { server.close(1000, 'Idle'); } catch {}
+  }, 15000);
+  const shutDown = () => { clearInterval(idleTimer); closeUpstream(); };
+
   server.addEventListener('message', (event) => {
+    lastSeen = Date.now();
     let msg;
     try { msg = JSON.parse(event.data); } catch { return; }
     if (msg.type !== 'subscribe') return;
     queue = queue.then(() => apply(msg)).catch(() => {}); // one subscription change at a time
   });
-  server.addEventListener('close', closeUpstream);
-  server.addEventListener('error', closeUpstream);
+  server.addEventListener('close', shutDown);
+  server.addEventListener('error', shutDown);
 
   return new Response(null, { status: 101, webSocket: client });
 }

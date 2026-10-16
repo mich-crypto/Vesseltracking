@@ -760,7 +760,11 @@ function wire() {
 
   const header = $('#top');
   addEventListener('scroll', () => header.classList.toggle('scrolled', scrollY > 8), { passive: true });
-  document.addEventListener('visibilitychange', () => { if (!document.hidden) scheduleRender(true); });
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) { feed?.pause?.(); return; }
+    feed?.resume?.();
+    scheduleRender(true);
+  });
 
   setInterval(() => scheduleRender(), 5000); // keeps "Updated … ago" honest
 }

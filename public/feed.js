@@ -35,7 +35,25 @@ export class LiveFeed {
     window.removeEventListener('offline', this.onOffline);
     clearTimeout(this.timer);
     clearInterval(this.pollTimer);
+    clearInterval(this.pingTimer);
     if (this.ws) { this.ws.onclose = null; this.ws.close(); }
+  }
+
+  /** App went to the background: hang up so the key's single AisStream connection is free. */
+  pause() {
+    this.paused = true;
+    clearTimeout(this.timer);
+    clearInterval(this.pollTimer); this.pollTimer = null;
+    clearInterval(this.pingTimer);
+    if (this.ws) { this.ws.onclose = null; this.ws.close(); this.ws = null; }
+  }
+
+  resume() {
+    if (!this.paused || this.stopped) return;
+    this.paused = false;
+    this.failures = 0;
+    this.rejections = 0;
+    this.connect();
   }
 
   /** Send a fresh subscription, e.g. after the watchlist changed or you moved. */
@@ -79,6 +97,9 @@ export class LiveFeed {
     ws.onopen = () => {
       this.onStatus('connecting', 'Waiting for the first AIS reports');
       this.resubscribe();
+      // Heartbeat: the Worker drops AisStream when it stops hearing from a frozen tab.
+      clearInterval(this.pingTimer);
+      this.pingTimer = setInterval(() => { if (ws.readyState === WebSocket.OPEN) ws.send('{"type":"ping"}'); }, 20000);
     };
     ws.onmessage = (ev) => {
       let msg;
@@ -99,6 +120,7 @@ export class LiveFeed {
       }
     };
     ws.onclose = () => {
+      clearInterval(this.pingTimer);
       if (serverError && !gotData) {
         // The key was refused (or missing). Stop after 3 in a row instead of retrying forever.
         this.rejections = (this.rejections || 0) + 1;
